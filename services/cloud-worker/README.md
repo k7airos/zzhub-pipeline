@@ -96,6 +96,7 @@ docker run -d --name pipeline-worker --restart unless-stopped \
 | `PIPELINE_WORKER_JOB_RESERVE_BYTES` | 每个准备／执行中任务的保守增长预留，默认 1 GiB |
 | `PIPELINE_WORKER_STEP_TIMEOUT_MS` | 单个 CLI 步骤（init、status、prepare、render 等）的墙钟上限，默认 600000（10 分钟）；超时后终止整个进程组，任务记为 `failed` |
 | `PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS` | publish 步骤的墙钟上限，默认 600000；超时无法确认是否已写入微信，任务记为 `interrupted` |
+| `PIPELINE_WORKER_PREVIEW_TTL_HOURS` | 未确认预览的保留时长，默认 0（不过期）。启动时与此后每小时检查一次，超时的 `preview_ready` 记为 `failed`、`error=preview_expired`；维护模式下不检查 |
 | `PIPELINE_ARTICLE_EXPORT_ENGINE` | 正文 HTML 导出引擎，`chrome`（默认）或 `dom`。`dom` 在独立 Bun 子进程中用 happy-dom 运行同一导出 bundle，不启动 Chrome；取值非法时 Worker 启动失败。当前值见 `/health.capabilities.articleExportEngine` |
 
 Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过子进程环境注入；不接受在任务正文参数里传入凭据。Pipeline 基础配置中的账号可提供样式，但当前 Worker 不会用它替代账号存储中的注册。
@@ -113,6 +114,7 @@ Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过�
 | `POST /v1/jobs` | 新任务返回 `202`；相同幂等键及内容返回原任务 `200` |
 | `GET /v1/jobs/:id` | 查询任务；不存在返回 `404` |
 | `GET /v1/jobs/by-idempotency-key?idempotencyKey=...&account=...` | 按原键与原 Worker 账号只读找回任务；无任务 `404`，账号不匹配 `409` |
+| `POST /v1/jobs/:id/discard` | 放弃未确认的预览（`preview_ready` 或仍在排队），任务记为 `failed`、`error=preview_discarded`；重复调用返回原结果，已确认 `409 preview_already_confirmed`，生成中 `409 preview_not_ready` |
 
 未认证为 `401`，非法输入为 `400`，相同幂等键对应不同输入为 `409 idempotency_conflict`。无封面快照请求仍限 2,500,000 字节；带封面请求上限 4,500,000 字节，Bun 同时限制实际读取大小，不依赖调用方声明的 Content-Length。当前没有任务列表、取消、重试、SSE 或任意文件上传接口；正文素材有下文的受限二进制入口。
 
@@ -199,9 +201,11 @@ v2 端到端定向检查由主控执行：`PIPELINE_V2_PREVIEW_TEST=1 bun test s
 
 Worker 接受任务、入队前解析并固化有效默认或已选配置，复制正文图片、默认资源、私有模板和固定封面字体，生成 `snapshotHash`。系统默认模板的远程资源仅允许部署显式 `PIPELINE_DEFAULT_ASSET_ORIGIN`（HTTPS origin）与 `PIPELINE_DEFAULT_ASSET_PATH_PREFIX` 前缀，拒绝重定向；该规则不用于任意正文 URL 下载。Typeset 默认字体映射为已验证 `Publishing Cover` 字节，并记录 requested/resolved 身份；未知自定义字体拒绝。正文 HTML 保留有效 CSS 字体栈，不宣称已固定客户端字体字节。
 
-`/health.capabilities` 增加 `articleSnapshotSchemaVersions: [1]`、`previewConfirm: true`、`bodyAssetUpload: true`。调用方还需核固定封面字体能力。完整快照要求包内 myno 与 Typeset Studio 适配器；Worker 固定任务私有 config/env，不在确认时读取实时默认。
+`/health.capabilities` 增加 `articleSnapshotSchemaVersions: [1]`、`previewConfirm: true`、`previewDiscard: true`、`bodyAssetUpload: true`。调用方还需核固定封面字体能力。完整快照要求包内 myno 与 Typeset Studio 适配器；Worker 固定任务私有 config/env，不在确认时读取实时默认。
 
 预览任务由真实 CLI 的 `status → next_action` 推进到 publish 检查点，再运行只做本地导出的 `article-export`，保存最终 HTML、封面 PNG、正文素材及产物 manifest，停在 `status/step=preview_ready`。预览不会调用微信 token、素材上传或草稿写接口；额外 provider guard 拒绝未确认预览执行 publish。`preview_ready` 重启后保持待确认，不自动入队。
+
+未确认的预览可以由调用后端 `POST /v1/jobs/:id/discard` 放弃，或在开启 `PIPELINE_WORKER_PREVIEW_TTL_HOURS` 后自动过期，二者都记为 `failed`（`error` 分别为 `preview_discarded` / `preview_expired`），沿用调用后端已有的失败语义释放额度；任务身份、幂等键与产物保留，此后确认返回 `409 preview_not_ready`。确认在等待空间预留期间如遇预览被放弃或过期，同样返回 `409`，不会把已关闭的预览重新入队。调用前先检查 `/health.capabilities.previewDiscard`。
 
 结果含 `inputHash`、`snapshotHash`、`artifactManifestHash`、`artifactManifest`。manifest 是 `{ schemaVersion: 1, snapshotHash, runtime: { pipeline, myno, typeset }, artifacts: [{ key, kind, contentType, byteLength, sha256 }] }`；固定 key 为 `article`、`cover`、`media_<UUID>`。公共 `createArtifactManifest`、`hashArtifactManifest`、`validateArtifactManifest` 供调用后端复用，避免另建格式。
 

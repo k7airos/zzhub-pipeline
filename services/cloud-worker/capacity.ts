@@ -8,11 +8,11 @@ export class WorkerLimitError extends Error {
   constructor(readonly code: string, readonly status: 413 | 429 | 507) { super(code); }
 }
 
-function setting(name: string, fallback: number): number {
+function setting(name: string, fallback: number, minimum = 1): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`Invalid ${name}`);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`Invalid ${name}`);
   return parsed;
 }
 
@@ -25,6 +25,8 @@ export const workerLimits = {
   // 单个 CLI 步骤的墙钟上限，防止卡住的步骤占住串行队列。
   stepTimeoutMs: setting("PIPELINE_WORKER_STEP_TIMEOUT_MS", 10 * 60 * 1000),
   publishStepTimeoutMs: setting("PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS", 10 * 60 * 1000),
+  // 未确认预览的保留时长，0 表示不过期（默认，保持旧部署行为）。
+  previewTtlHours: setting("PIPELINE_WORKER_PREVIEW_TTL_HOURS", 0, 0),
 };
 
 /** 仅统计受控任务目录；未来写入预留随已实际写入的字节减少。 */

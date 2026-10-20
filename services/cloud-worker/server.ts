@@ -11,7 +11,8 @@ import { canonicalHash, validateArticleSnapshot } from "../../src/article-snapsh
 import { maxAssetBytes, putBodyAsset } from "./assets";
 import { prepareArticleMaterials, readPreparedArticle } from "./job-materials";
 import { readArtifact } from "./artifacts";
-import { WorkerCapacity, WorkerLimitError } from "./capacity";
+import { WorkerCapacity, WorkerLimitError, workerLimits } from "./capacity";
+import { closePreview, expiredPreviews, isClosedPreview, isOpenPreview } from "./retention";
 import { resolveArticleExportEngine } from "../../src/wechat-preview/dom-export";
 
 // 正文最多 2 MiB，另预留一张 1 MiB JPEG 的 base64 与模板 JSON。
@@ -127,6 +128,24 @@ function requestHash(input: CloudJobInput): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
+const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
+let retentionRunning = false;
+
+/** 定期收尾：过期未确认的预览。维护模式下不改动任务，保证备份期间存储稳定。 */
+async function runRetention(): Promise<void> {
+  if (retentionRunning || maintenance) return;
+  retentionRunning = true;
+  try {
+    const now = new Date();
+    for (const job of expiredPreviews(store.jobs.values(), now.getTime(), workerLimits.previewTtlHours * 60 * 60 * 1000)) {
+      closePreview(job, "expired", now);
+      await store.set(job);
+    }
+  } finally {
+    retentionRunning = false;
+  }
+}
+
 async function drain(): Promise<void> {
   if (draining)
     return;
@@ -181,6 +200,8 @@ async function main(): Promise<void> {
     if (error.code === "ENOENT") return "false";
     throw error;
   })) === true;
+  await runRetention();
+  setInterval(() => { void runRetention().catch(error => console.error("worker retention failed", error)); }, RETENTION_INTERVAL_MS).unref();
   for (const job of store.jobs.values()) {
     if (job.status === "queued") queue.push(job.id);
   }
@@ -197,7 +218,7 @@ async function main(): Promise<void> {
       if (url.pathname === "/health" && request.method === "GET")
         return json({ service: "zzhub-pipeline-worker", status: "ok", queued: queue.length, running: draining, accepting: [...store.jobs.values()].filter(job => job.status === "accepting").length,
           preparing: capacity.preparingCount, assetWrites, accounts: accounts.accounts.size, maintenance,
-          capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, articleExportEngine: resolveArticleExportEngine(), ...await coverCapabilities() } });
+          capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, previewDiscard: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, articleExportEngine: resolveArticleExportEngine(), ...await coverCapabilities() } });
 
       try {
         const assetMatch = url.pathname.match(/^\/v1\/assets\/([a-f\d]{64})$/);
@@ -214,6 +235,18 @@ async function main(): Promise<void> {
           if (!job?.input.articleSnapshot || !job.result?.artifactManifestHash) return json({ error: "artifact_not_found" }, 404);
           const asset = await readArtifact(defaultJobWorkspace(workspaceRoot, job.id), artifactMatch[2]!, String(job.result.artifactManifestHash), String(job.result.snapshotHash));
           return new Response(new Uint8Array(asset.bytes), { headers: { "Content-Type": asset.artifact.contentType, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
+        }
+        const discardMatch = url.pathname.match(/^\/v1\/jobs\/([^/]+)\/discard$/);
+        if (discardMatch && request.method === "POST") {
+          // 放弃只减少工作量，维护模式下同样允许；检查与修改在同一同步段内完成，与确认互斥。
+          const job = store.get(discardMatch[1]!);
+          if (!job?.input.articleSnapshot) return json({ error: "preview_job_not_found" }, 404);
+          if (isClosedPreview(job)) return json(await publicJob(job), 200);
+          if (job.publicationRequested) return json({ error: "preview_already_confirmed" }, 409);
+          if (!isOpenPreview(job)) return json({ error: "preview_not_ready" }, 409);
+          closePreview(job, "discarded");
+          await store.set(job);
+          return json(await publicJob(job), 200);
         }
         const confirmMatch = url.pathname.match(/^\/v1\/jobs\/([^/]+)\/publish$/);
         if (confirmMatch && request.method === "POST") {
@@ -236,6 +269,8 @@ async function main(): Promise<void> {
             return json(await publicJob(job), 200);
           }
           if (maintenance) { if (reserved) capacity.releaseJob(job.id); return json({ error: "worker_maintenance" }, 503); }
+          // 等待期间预览可能已被放弃或过期，不能把已关闭的预览重新入队。
+          if (job.status !== "preview_ready") { if (reserved) capacity.releaseJob(job.id); return json({ error: "preview_not_ready" }, 409); }
           job.publicationRequested = true; job.status = "queued"; job.step = "queued";
           try { await store.set(job); } catch (error) { if (reserved) capacity.releaseJob(job.id); throw error; }
           queue.push(job.id); void drain();
