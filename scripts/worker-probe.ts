@@ -5,7 +5,7 @@
  *
  * Usage:
  *   bun scripts/worker-probe.ts [--build] [--image TAG] [--memory 1200m]
- *     [--engines chrome,dom] [--scenarios short,long] [--out result.json]
+ *     [--engines chrome,dom] [--scenarios short,medium,long] [--out result.json]
  *
  * 每个「引擎 × 场景」使用全新容器，关闭 swap，让内存不足如实表现为 OOM。
  * 微信中转为宿主机上的可计数替身，不触达真实微信。
@@ -75,6 +75,16 @@ function scenario(name: string): Scenario {
       "## 配置保真", paragraph, `![示例图片](asset:${image.id} "图注")`, "> 摘录内容",
       "| 表头一 | 表头二 |\n|---|---|\n| 内容 | 内容 |", "```ts\nconst probe = true;\n```",
     ].join("\n\n") };
+  }
+  if (name === "medium") {
+    // 常见文章：约 2000 字、10 张图。
+    const images = Array.from({ length: 10 }, (_, index) => ({ id: randomUUID(), bytes: photo(1600, 1000, index + 30), width: 1600, height: 1000 }));
+    const sections: string[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      sections.push(`## 第 ${index + 1} 节`, ...Array.from({ length: 4 }, () => paragraph), `![第 ${index + 1} 张图](asset:${images[index]!.id} "图注 ${index + 1}")`);
+    }
+    sections.push("> [!TIP] 提示\n> 提示卡片内容。", "- 列表一\n- 列表二", "```ts\nconst medium = true;\n```");
+    return { title: "容量实测常规文章", images, body: sections.join("\n\n") };
   }
   if (name === "long") {
     const images = Array.from({ length: 20 }, (_, index) => ({ id: randomUUID(), bytes: photo(1600, 1000, index + 2), width: 1600, height: 1000 }));

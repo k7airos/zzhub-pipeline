@@ -107,7 +107,7 @@ Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过�
 Worker 串行执行任务，内存峰值出现在预览阶段（CLI 进程、封面与图片处理、正文导出）。`scripts/worker-probe.ts` 在全新、关闭 swap 的限内存容器中走完整的“预览 → 确认 → 草稿”流程（微信中转为计数替身），报告各阶段 `anon + shmem + kernel` 峰值（回收页缓存后仍需的内存）、OOM 次数、耗时与磁盘占用：
 
 ```bash
-bun scripts/worker-probe.ts --build --memory 768m --out tmp/probe.json
+bun scripts/worker-probe.ts --build --memory 768m --scenarios short,medium,long --out tmp/probe.json
 ```
 
 2026-10-20 在 arm64 Docker（镜像 `aeb8b2c`）上的结果，v2 完整样式 + 预渲染封面：
@@ -116,10 +116,12 @@ bun scripts/worker-probe.ts --build --memory 768m --out tmp/probe.json
 | --- | --- | --- | --- | --- | --- | --- |
 | 短文 1 图 | chrome | 87 MiB | 351 MiB | 181 MiB | — | — |
 | 短文 1 图 | dom | 90 MiB | 367 MiB | 192 MiB | — | — |
+| 约 2000 字 10 图 | chrome | 87–90 MiB | 428–440 MiB | 273–281 MiB | 通过 | — |
+| 约 2000 字 10 图 | dom | 88–91 MiB | 442–474 MiB | 266–292 MiB | 通过 | — |
 | 约 2 万字 20 图 | chrome | 87 MiB | 488–512 MiB | 305–341 MiB | 通过 | 通过 |
 | 约 2 万字 20 图 | dom | 89 MiB | 521–559 MiB | 301–317 MiB | 导出子进程 OOM，任务 `failed` | 通过 |
 
-据此建议每个 Worker 设 `mem_limit: 768m`，并保持默认的 `chrome` 引擎：在该负载下 Chrome 共享内存只有约 8 MiB，happy-dom 子进程并不更省内存。生产主机为 amd64 时，上线后用 `docker stats --no-stream` 在一篇长文预览期间复核。内存不足时 cgroup 先终止占用最大的子进程，Worker 主进程和容器不重启，任务记为 `failed`；不需要额外的 `shm_size`。长文任务目录约 30 MiB，素材缓存约 10 MiB，墓碑化前 `jobs.json` 每个长文任务约 80 KiB。
+常规文章（约 2000 字、10 图，各引擎 3 轮）两种引擎差别在测量波动附近：dom 预览快约 0.4 s，内存多 15–35 MiB。内存主要随图片数增长（1600×1000 JPEG 每张约 8 MiB），与字数和引擎关系不大。据此建议每个 Worker 设 `mem_limit: 768m`，并保持默认的 `chrome` 引擎：在该负载下 Chrome 共享内存只有约 8 MiB，happy-dom 子进程并不更省内存。生产主机为 amd64 时，上线后用 `docker stats --no-stream` 在一篇长文预览期间复核。内存不足时 cgroup 先终止占用最大的子进程，Worker 主进程和容器不重启，任务记为 `failed`；不需要额外的 `shm_size`。长文任务目录约 30 MiB，素材缓存约 10 MiB，墓碑化前 `jobs.json` 每个长文任务约 80 KiB。
 
 `/health` 除队列计数外还提供巡检字段（不含正文、输入或凭据）：`runningJob`（`{ id, step, startedAt }` 或 `null`）、`oldestQueuedAt`（排队最久任务进入队列的时间）、`previewReady`（待确认预览数）、`retention`（`terminalDays`、`previewTtlHours`、`lastRunAt`、`lastExpired`、`lastPruned`）。建议巡检在 `runningJob.startedAt` 超过 20 分钟或 `oldestQueuedAt` 超过 30 分钟时告警；单步骤已有 `PIPELINE_WORKER_STEP_TIMEOUT_MS` 上限，超出说明 Worker 本身异常。
 
