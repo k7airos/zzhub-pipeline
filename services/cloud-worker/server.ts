@@ -12,7 +12,7 @@ import { maxAssetBytes, putBodyAsset } from "./assets";
 import { prepareArticleMaterials, readPreparedArticle } from "./job-materials";
 import { readArtifact } from "./artifacts";
 import { WorkerCapacity, WorkerLimitError, workerLimits } from "./capacity";
-import { closePreview, expiredPreviews, isClosedPreview, isOpenPreview } from "./retention";
+import { closePreview, expiredPreviews, isClosedPreview, isOpenPreview, prunableJobs, pruneJob } from "./retention";
 import { resolveArticleExportEngine } from "../../src/wechat-preview/dom-export";
 
 // 正文最多 2 MiB，另预留一张 1 MiB JPEG 的 base64 与模板 JSON。
@@ -55,7 +55,7 @@ async function publicJob(job: StoredCloudJob): Promise<Record<string, unknown>> 
   delete safeJob.preparedHash;
   delete safeJob.acceptanceIncomplete;
   const progress = await cloudJobProgress({ ...job }, workspaceRoot).catch(() => null);
-  return { ...safeJob, bodyHash: createHash("sha256").update(job.body).digest("hex"), input: { ...job.input }, ...progress };
+  return { ...safeJob, bodyHash: job.bodyHash ?? createHash("sha256").update(job.body).digest("hex"), input: { ...job.input }, ...progress };
 }
 
 function validateInput(value: unknown): CloudJobInput {
@@ -131,7 +131,7 @@ function requestHash(input: CloudJobInput): string {
 const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 let retentionRunning = false;
 
-/** 定期收尾：过期未确认的预览。维护模式下不改动任务，保证备份期间存储稳定。 */
+/** 定期收尾：过期未确认的预览，再把超过保留期的终态任务墓碑化。维护模式下不改动任务，保证备份期间存储稳定。 */
 async function runRetention(): Promise<void> {
   if (retentionRunning || maintenance) return;
   retentionRunning = true;
@@ -139,6 +139,14 @@ async function runRetention(): Promise<void> {
     const now = new Date();
     for (const job of expiredPreviews(store.jobs.values(), now.getTime(), workerLimits.previewTtlHours * 60 * 60 * 1000)) {
       closePreview(job, "expired", now);
+      await store.set(job);
+    }
+    const days = workerLimits.terminalRetentionDays;
+    for (const job of prunableJobs(store.jobs.values(), now.getTime(), days, id => capacity.isReserved(id))) {
+      // 先删目录再写墓碑；删除失败时保留完整记录，下一轮重试。
+      try { await rm(defaultJobWorkspace(workspaceRoot, job.id), { recursive: true, force: true }); }
+      catch (error) { console.error(`worker retention could not remove job ${job.id}`, error); continue; }
+      pruneJob(job, days, now);
       await store.set(job);
     }
   } finally {
@@ -218,7 +226,7 @@ async function main(): Promise<void> {
       if (url.pathname === "/health" && request.method === "GET")
         return json({ service: "zzhub-pipeline-worker", status: "ok", queued: queue.length, running: draining, accepting: [...store.jobs.values()].filter(job => job.status === "accepting").length,
           preparing: capacity.preparingCount, assetWrites, accounts: accounts.accounts.size, maintenance,
-          capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, previewDiscard: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, articleExportEngine: resolveArticleExportEngine(), ...await coverCapabilities() } });
+          capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, previewDiscard: true, terminalRetention: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, articleExportEngine: resolveArticleExportEngine(), ...await coverCapabilities() } });
 
       try {
         const assetMatch = url.pathname.match(/^\/v1\/assets\/([a-f\d]{64})$/);
@@ -232,6 +240,7 @@ async function main(): Promise<void> {
         const artifactMatch = url.pathname.match(/^\/v1\/jobs\/([^/]+)\/artifacts\/([^/]+)$/);
         if (artifactMatch && request.method === "GET") {
           const job = store.get(artifactMatch[1]!);
+          if (job?.pruned && job.result?.artifactManifestHash) return json({ error: "artifact_pruned" }, 410);
           if (!job?.input.articleSnapshot || !job.result?.artifactManifestHash) return json({ error: "artifact_not_found" }, 404);
           const asset = await readArtifact(defaultJobWorkspace(workspaceRoot, job.id), artifactMatch[2]!, String(job.result.artifactManifestHash), String(job.result.snapshotHash));
           return new Response(new Uint8Array(asset.bytes), { headers: { "Content-Type": asset.artifact.contentType, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
@@ -353,6 +362,7 @@ async function main(): Promise<void> {
               startedAt: null,
               finishedAt: null,
               body: input.body,
+              bodyHash: createHash("sha256").update(input.body).digest("hex"),
               statePath: null,
               acceptanceIncomplete: true,
               ...(input.articleSnapshot ? { publicationRequested: false } : {}),

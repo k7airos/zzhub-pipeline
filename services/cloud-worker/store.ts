@@ -41,6 +41,10 @@ export interface CloudJob {
 
 export interface StoredCloudJob extends CloudJob {
   body: string;
+  /** 原始正文的 SHA-256；墓碑化清空正文后仍用于调用方核对。 */
+  bodyHash?: string;
+  /** 终态任务超过保留期后，大字段与工作目录已清理。 */
+  pruned?: { at: string; retentionDays: number };
   statePath: string | null;
   publicationRequested?: boolean;
   preparedHash?: string;
@@ -72,6 +76,7 @@ export class JobStore {
       if (!Array.isArray(parsed.jobs)) throw new Error("Invalid worker job store");
       for (const job of parsed.jobs) {
         job.requestHash ||= createHash("sha256").update(JSON.stringify({ ...job.input, body: job.body })).digest("hex");
+        job.bodyHash ||= createHash("sha256").update(job.body).digest("hex");
         if (job.status === "accepting") {
           job.status = "failed";
           job.error = "worker_acceptance_interrupted";

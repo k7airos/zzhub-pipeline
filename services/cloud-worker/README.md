@@ -97,6 +97,7 @@ docker run -d --name pipeline-worker --restart unless-stopped \
 | `PIPELINE_WORKER_STEP_TIMEOUT_MS` | 单个 CLI 步骤（init、status、prepare、render 等）的墙钟上限，默认 600000（10 分钟）；超时后终止整个进程组，任务记为 `failed` |
 | `PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS` | publish 步骤的墙钟上限，默认 600000；超时无法确认是否已写入微信，任务记为 `interrupted` |
 | `PIPELINE_WORKER_PREVIEW_TTL_HOURS` | 未确认预览的保留时长，默认 0（不过期）。启动时与此后每小时检查一次，超时的 `preview_ready` 记为 `failed`、`error=preview_expired`；维护模式下不检查 |
+| `PIPELINE_WORKER_TERMINAL_RETENTION_DAYS` | `succeeded`/`failed` 任务结束后的完整保留天数，默认 0（永久保留）。到期后删除任务工作目录，`jobs.json` 中只留墓碑，见“幂等、恢复与更新” |
 | `PIPELINE_ARTICLE_EXPORT_ENGINE` | 正文 HTML 导出引擎，`chrome`（默认）或 `dom`。`dom` 在独立 Bun 子进程中用 happy-dom 运行同一导出 bundle，不启动 Chrome；取值非法时 Worker 启动失败。当前值见 `/health.capabilities.articleExportEngine` |
 
 Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过子进程环境注入；不接受在任务正文参数里传入凭据。Pipeline 基础配置中的账号可提供样式，但当前 Worker 不会用它替代账号存储中的注册。
@@ -201,7 +202,7 @@ v2 端到端定向检查由主控执行：`PIPELINE_V2_PREVIEW_TEST=1 bun test s
 
 Worker 接受任务、入队前解析并固化有效默认或已选配置，复制正文图片、默认资源、私有模板和固定封面字体，生成 `snapshotHash`。系统默认模板的远程资源仅允许部署显式 `PIPELINE_DEFAULT_ASSET_ORIGIN`（HTTPS origin）与 `PIPELINE_DEFAULT_ASSET_PATH_PREFIX` 前缀，拒绝重定向；该规则不用于任意正文 URL 下载。Typeset 默认字体映射为已验证 `Publishing Cover` 字节，并记录 requested/resolved 身份；未知自定义字体拒绝。正文 HTML 保留有效 CSS 字体栈，不宣称已固定客户端字体字节。
 
-`/health.capabilities` 增加 `articleSnapshotSchemaVersions: [1]`、`previewConfirm: true`、`previewDiscard: true`、`bodyAssetUpload: true`。调用方还需核固定封面字体能力。完整快照要求包内 myno 与 Typeset Studio 适配器；Worker 固定任务私有 config/env，不在确认时读取实时默认。
+`/health.capabilities` 增加 `articleSnapshotSchemaVersions: [1]`、`previewConfirm: true`、`previewDiscard: true`、`terminalRetention: true`、`bodyAssetUpload: true`。调用方还需核固定封面字体能力。完整快照要求包内 myno 与 Typeset Studio 适配器；Worker 固定任务私有 config/env，不在确认时读取实时默认。
 
 预览任务由真实 CLI 的 `status → next_action` 推进到 publish 检查点，再运行只做本地导出的 `article-export`，保存最终 HTML、封面 PNG、正文素材及产物 manifest，停在 `status/step=preview_ready`。预览不会调用微信 token、素材上传或草稿写接口；额外 provider guard 拒绝未确认预览执行 publish。`preview_ready` 重启后保持待确认，不自动入队。
 
@@ -209,7 +210,7 @@ Worker 接受任务、入队前解析并固化有效默认或已选配置，复�
 
 结果含 `inputHash`、`snapshotHash`、`artifactManifestHash`、`artifactManifest`。manifest 是 `{ schemaVersion: 1, snapshotHash, runtime: { pipeline, myno, typeset }, artifacts: [{ key, kind, contentType, byteLength, sha256 }] }`；固定 key 为 `article`、`cover`、`media_<UUID>`。公共 `createArtifactManifest`、`hashArtifactManifest`、`validateArtifactManifest` 供调用后端复用，避免另建格式。
 
-`GET /v1/jobs/:id/artifacts/:key` 只读取该任务 manifest 的固定 key，要求 Worker Token，校对 job 保存的 manifest/snapshot 身份与实际文件 hash；不接受文件路径。业务后端检查 owner/job 归属后代理字节，前端以无脚本 sandbox 展示，将 HTML 中 `asset:<UUID>` 的实际 img 属性映射为受控素材，不注入主页面 DOM。
+`GET /v1/jobs/:id/artifacts/:key` 只读取该任务 manifest 的固定 key，要求 Worker Token，校对 job 保存的 manifest/snapshot 身份与实际文件 hash；不接受文件路径。任务已墓碑化时返回 `410 artifact_pruned`。业务后端检查 owner/job 归属后代理字节，前端以无脚本 sandbox 展示，将 HTML 中 `asset:<UUID>` 的实际 img 属性映射为受控素材，不注入主页面 DOM。
 
 `POST /v1/jobs/:id/publish` 只接 `{ snapshotHash, artifactManifestHash }`。首次确认核对双 hash 和材料完整性，持久化 `publicationRequested` 后继续同 job/run；重复确认返回原身份，不修改原输入 hash，不重新 init/导出/渲染。维护模式拒绝首次确认。业务后端必须在自己的事务中锁定文档与任务，核对当前 documentRevision 后接受确认；接受后再编辑文章不撤销已经接受的任务，同 hash 重试仍查原结果。
 
@@ -307,7 +308,9 @@ curl http://127.0.0.1:18887/v1/jobs/JOB_ID \
 
 相同 `idempotencyKey` 且输入一致时，返回已存任务，包含已经失败或中断的任务；不会重新入队。输入变化必须使用新的键。键在整个 Worker 内共享，由业务后端隔离不同用户。
 
-`jobs.json` 持久化任务和正文，每个工作区位于 `<PIPELINE_WORKSPACE_ROOT>/jobs/<job-id>/`。重启后 `queued` 任务继续执行，`running` 任务标记为 `interrupted`，不自动重发。没有任务历史自动清理或多副本锁；只运行一个 Worker 进程管理该数据目录。
+`jobs.json` 持久化任务和正文，每个工作区位于 `<PIPELINE_WORKSPACE_ROOT>/jobs/<job-id>/`。重启后 `queued` 任务继续执行，`running` 任务标记为 `interrupted`，不自动重发。没有多副本锁；只运行一个 Worker 进程管理该数据目录。
+
+设置 `PIPELINE_WORKER_TERMINAL_RETENTION_DAYS` 后，Worker 在启动时和此后每小时（维护模式除外）把结束超过保留期的 `succeeded`/`failed` 任务墓碑化：先删除 `jobs/<job-id>/`，再在 `jobs.json` 中清空正文、样式与封面快照、产物清单和 `statePath`，保留 `id`、`requestHash`、`bodyHash`、幂等键、账号、标题、状态、时间、`publishResults` 与各类 hash，并记录 `pruned`。任务记录本身从不删除：相同幂等键和输入仍返回原任务，输入不同仍为 `409`，按原键找回也可用，不会因清理而重复建草稿。`interrupted`、`preview_ready`、排队和执行中的任务不清理。墓碑化后快照不再引用的素材，由素材缓存按 TTL 回收。调用后端应在 Worker 墓碑化之前停止依赖旧任务的产物。
 
 出现 `WX_RESULT_UNKNOWN`、超时或 `interrupted` 时，先检查原 Pipeline run 和微信草稿箱。确认已创建草稿后，后续修订可通过 `existingDraftMediaId` 更新；确认需要新任务后再分配新的幂等键。不要通过更换键来盲目重试，否则可能重复建草稿。
 

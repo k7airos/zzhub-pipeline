@@ -3,7 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { StoredCloudJob } from "./store";
-import { closePreview, expiredPreviews, isClosedPreview, isOpenPreview, PREVIEW_DISCARDED, PREVIEW_EXPIRED } from "./retention";
+import { createHash } from "node:crypto";
+import { mkdir, stat } from "node:fs/promises";
+import { closePreview, expiredPreviews, isClosedPreview, isOpenPreview, PREVIEW_DISCARDED, PREVIEW_EXPIRED, prunableJobs, pruneJob } from "./retention";
 
 const HOUR = 60 * 60 * 1000;
 const NOW = Date.parse("2026-10-20T12:00:00.000Z");
@@ -52,23 +54,108 @@ describe("preview retention rules", () => {
   });
 });
 
+describe("terminal job tombstones", () => {
+  const DAY = 24 * HOUR;
+  const ended = (id: string, status: StoredCloudJob["status"], daysAgo: number, overrides: Partial<StoredCloudJob> = {}) =>
+    previewJob(id, { status, finishedAt: new Date(NOW - daysAgo * DAY).toISOString(), ...overrides });
+
+  test("selects only unpruned, unreserved terminal jobs past the retention period", () => {
+    const jobs = [
+      ended("old-success", "succeeded", 40), ended("old-failed", "failed", 36), ended("recent", "succeeded", 10),
+      ended("interrupted", "interrupted", 40), ended("ready", "preview_ready", 40), ended("reserved", "failed", 40),
+      ended("pruned", "succeeded", 40, { pruned: { at: new Date(NOW).toISOString(), retentionDays: 35 } }),
+    ];
+    expect(prunableJobs(jobs, NOW, 35, id => id === "reserved").map(job => job.id)).toEqual(["old-success", "old-failed"]);
+    expect(prunableJobs(jobs, NOW, 0, () => false)).toEqual([]);
+  });
+
+  test("keeps identity, hashes and publish results and drops bulky fields", () => {
+    const job = ended("tomb", "succeeded", 40, {
+      body: "原始正文", statePath: "/data/jobs/tomb/state.json",
+      result: { snapshotHash: "snapshot", artifactManifestHash: "manifest", artifactManifest: { artifacts: [] }, publishResults: [{ status: "success", external_id: "MEDIA" }] },
+    });
+    const before = { requestHash: job.requestHash, key: job.input.idempotencyKey };
+    pruneJob(job, 35, new Date(NOW));
+    expect(job.body).toBe("");
+    expect(job.bodyHash).toBe(createHash("sha256").update("原始正文").digest("hex"));
+    expect(job.statePath).toBeNull();
+    expect(job.input).toEqual({ idempotencyKey: before.key, title: "title", contentForm: "article", account: "test", operation: "preview" });
+    expect(job.requestHash).toBe(before.requestHash);
+    expect(job.result).toEqual({ snapshotHash: "snapshot", artifactManifestHash: "manifest", publishResults: [{ status: "success", external_id: "MEDIA" }] });
+    expect(job.pruned).toEqual({ at: new Date(NOW).toISOString(), retentionDays: 35 });
+  });
+
+  test("tombstoned jobs still answer idempotent submissions and refuse their artifacts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zzp-tombstone-"));
+    const input = { idempotencyKey: "tomb-key", title: "墓碑", body: "墓碑正文", contentForm: "article", account: "missing" };
+    try {
+      // 用真实提交生成任务：账号不存在，任务在调用 CLI 前失败，requestHash 与线上一致。
+      let worker = await startWorker(root, {});
+      let id: string;
+      try {
+        const submitted = await fetch(`${worker.url}/v1/jobs`, { method: "POST", headers, body: JSON.stringify(input) });
+        id = (await submitted.json()).id;
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          if ((await (await fetch(`${worker.url}/v1/jobs/${id}`, { headers })).json()).status === "failed") break;
+          await Bun.sleep(25);
+        }
+      } finally { await worker.stop(); }
+      const stateFile = join(root, "jobs.json");
+      const store = JSON.parse(await readFile(stateFile, "utf8"));
+      const job = store.jobs.find((item: StoredCloudJob) => item.id === id);
+      expect(job.status).toBe("failed");
+      job.finishedAt = new Date(Date.now() - 40 * DAY).toISOString();
+      const closedPreview = previewJob("closed-preview", { status: "failed", error: PREVIEW_EXPIRED, finishedAt: new Date(Date.now() - 40 * DAY).toISOString() });
+      store.jobs.push(closedPreview);
+      await writeFile(stateFile, JSON.stringify(store));
+      for (const jobId of [id!, "closed-preview"]) {
+        await mkdir(join(root, "jobs", jobId), { recursive: true });
+        await writeFile(join(root, "jobs", jobId, "artifact.html"), "x".repeat(1024));
+      }
+
+      worker = await startWorker(root, { PIPELINE_WORKER_TERMINAL_RETENTION_DAYS: "35" });
+      try {
+        expect((await (await fetch(`${worker.url}/health`, { headers })).json()).capabilities.terminalRetention).toBe(true);
+        const tomb = await (await fetch(`${worker.url}/v1/jobs/${id!}`, { headers })).json();
+        expect(tomb).toMatchObject({ id, status: "failed", bodyHash: createHash("sha256").update(input.body).digest("hex"), pruned: { retentionDays: 35 } });
+        for (const jobId of [id!, "closed-preview"]) await expect(stat(join(root, "jobs", jobId))).rejects.toThrow();
+        const again = await fetch(`${worker.url}/v1/jobs`, { method: "POST", headers, body: JSON.stringify(input) });
+        expect(again.status).toBe(200);
+        expect((await again.json()).id).toBe(id!);
+        const changed = await fetch(`${worker.url}/v1/jobs`, { method: "POST", headers, body: JSON.stringify({ ...input, body: "改过的正文" }) });
+        expect(changed.status).toBe(409);
+        const lookup = await fetch(`${worker.url}/v1/jobs/by-idempotency-key?idempotencyKey=tomb-key&account=missing`, { headers });
+        expect((await lookup.json()).id).toBe(id!);
+        const artifact = await fetch(`${worker.url}/v1/jobs/closed-preview/artifacts/article`, { headers });
+        expect(artifact.status).toBe(410);
+        expect((await artifact.json()).error).toBe("artifact_pruned");
+      } finally { await worker.stop(); }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }, 30_000);
+});
+
 // 真实 Worker HTTP；任务存储直接写入已就绪预览，避免依赖 Chrome 与真实 CLI。
 async function withWorker(jobs: StoredCloudJob[], env: Record<string, string>, run: (url: string, root: string) => Promise<void>, options: { maintenance?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "zzp-preview-retention-"));
   const stateFile = join(root, "jobs.json");
   await writeFile(stateFile, JSON.stringify({ jobs }));
   if (options.maintenance) await writeFile(`${stateFile}.maintenance.json`, "true");
+  const worker = await startWorker(root, env);
+  try { await run(worker.url, root); }
+  finally { await worker.stop(); await rm(root, { recursive: true, force: true }); }
+}
+
+async function startWorker(root: string, env: Record<string, string>) {
   const child = Bun.spawn([process.execPath, join(import.meta.dir, "server.ts")], {
     env: { ...process.env, PIPELINE_WORKER_HOST: "127.0.0.1", PIPELINE_WORKER_PORT: "0", PIPELINE_WORKER_TOKEN: "retention-test",
-      PIPELINE_WORKSPACE_ROOT: root, PIPELINE_WORKER_STATE_FILE: stateFile, PIPELINE_WORKER_FREE_BYTES: "1", PIPELINE_WORKER_JOB_RESERVE_BYTES: "1", ...env },
+      PIPELINE_WORKSPACE_ROOT: root, PIPELINE_WORKER_STATE_FILE: join(root, "jobs.json"), PIPELINE_WORKER_FREE_BYTES: "1", PIPELINE_WORKER_JOB_RESERVE_BYTES: "1", ...env },
     stdout: "pipe", stderr: "inherit",
   });
-  try {
-    const reader = child.stdout.getReader(); const { value } = await reader.read(); reader.releaseLock();
-    const address = new TextDecoder().decode(value).match(/listening on (127\.0\.0\.1:\d+)/)?.[1];
-    if (!address) throw new Error("Worker did not start");
-    await run(`http://${address}`, root);
-  } finally { child.kill(); await child.exited; await rm(root, { recursive: true, force: true }); }
+  const stop = async () => { child.kill(); await child.exited; };
+  const reader = child.stdout.getReader(); const { value } = await reader.read(); reader.releaseLock();
+  const address = new TextDecoder().decode(value).match(/listening on (127\.0\.0\.1:\d+)/)?.[1];
+  if (!address) { await stop(); throw new Error("Worker did not start"); }
+  return { url: `http://${address}`, stop };
 }
 
 const headers = { Authorization: "Bearer retention-test" };

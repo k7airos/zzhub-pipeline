@@ -27,6 +27,8 @@ export const workerLimits = {
   publishStepTimeoutMs: setting("PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS", 10 * 60 * 1000),
   // 未确认预览的保留时长，0 表示不过期（默认，保持旧部署行为）。
   previewTtlHours: setting("PIPELINE_WORKER_PREVIEW_TTL_HOURS", 0, 0),
+  // 终态任务保留天数，到期后只留墓碑；0 表示永久保留（默认）。
+  terminalRetentionDays: setting("PIPELINE_WORKER_TERMINAL_RETENTION_DAYS", 0, 0),
 };
 
 /** 仅统计受控任务目录；未来写入预留随已实际写入的字节减少。 */
@@ -84,6 +86,8 @@ export class WorkerCapacity {
   }
 
   get preparingCount() { return this.preparing; }
+
+  isReserved(id: string) { return this.reservations.has(id); }
 
   async checkPhase() { await this.locked(() => this.checkSpace()); }
 
