@@ -8,7 +8,7 @@ import { validateArticleStyleSnapshot } from "../../src/article-style";
 import { readArticleTheme } from "../../src/article-theme";
 import { materializeCoverSnapshot, type JobCoverMaterials } from "./cover";
 import { ARTICLE_COVER_IMAGE_KEY } from "@akairos/typeset-studio/cover";
-import type { WorkerCapacity } from "./capacity";
+import { workerLimits, type WorkerCapacity } from "./capacity";
 import { boundedOutput } from "./bounded-output";
 import { readPreparedArticle, preparedCover, type PreparedArticle } from "./job-materials";
 import { artifactsPath, freezeArticleArtifacts } from "./artifacts";
@@ -101,17 +101,28 @@ async function runPipelineCommand(
     env: environment,
     stdout: "pipe",
     stderr: "pipe",
+    // 独立进程组：超时或结束时连同 Chrome 等孙进程一起终止，避免其持有管道或内存。
+    detached: true,
   });
+  const killGroup = () => {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* 进程组已结束 */ }
+  };
+  const timeoutMs = command === "publish" ? workerLimits.publishStepTimeoutMs : workerLimits.stepTimeoutMs;
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; killGroup(); }, timeoutMs);
   const [output, errors, exitCode] = await Promise.all([
-    boundedOutput(child.stdout, 8 * 1024 * 1024, false, () => child.kill()),
+    boundedOutput(child.stdout, 8 * 1024 * 1024, false, killGroup),
     boundedOutput(child.stderr, 64 * 1024, true),
     child.exited,
-  ]).catch(error => { throw command === "publish" ? new WorkerPublishUncertainError(error instanceof Error ? error.message : String(error)) : error; });
+  ]).catch(error => { throw command === "publish" ? new WorkerPublishUncertainError(error instanceof Error ? error.message : String(error)) : error; })
+    .finally(() => { clearTimeout(timer); killGroup(); });
   const stdout = output.text, stderr = `${errors.exceeded ? "[Worker stderr truncated]\n" : ""}${errors.text}`;
   let result: any = null;
   const fail = (message: string, uncertain = command === "publish"): never => {
     throw uncertain ? new WorkerPublishUncertainError(message, Array.isArray(result?.publish_results) ? result.publish_results : undefined) : new Error(message);
   };
+  // 发布步骤超时不能确认是否已写入微信，保留为 interrupted；其他步骤明确失败。
+  if (timedOut) fail(`${command} timed out after ${timeoutMs}ms; inspect the original run before retrying`);
   if (output.exceeded) fail(`${command} returned output above the Worker limit; inspect the original run before retrying`);
   if (stdout.trim()) {
     try { result = JSON.parse(stdout); }

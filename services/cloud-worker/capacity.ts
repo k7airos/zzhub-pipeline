@@ -22,6 +22,9 @@ export const workerLimits = {
   prepareConcurrency: setting("PIPELINE_WORKER_PREPARE_CONCURRENCY", 2),
   freeBytes: setting("PIPELINE_WORKER_FREE_BYTES", 4 * 1024 * MiB),
   jobReserveBytes: setting("PIPELINE_WORKER_JOB_RESERVE_BYTES", 1024 * MiB),
+  // 单个 CLI 步骤的墙钟上限，防止卡住的步骤占住串行队列。
+  stepTimeoutMs: setting("PIPELINE_WORKER_STEP_TIMEOUT_MS", 10 * 60 * 1000),
+  publishStepTimeoutMs: setting("PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS", 10 * 60 * 1000),
 };
 
 /** 仅统计受控任务目录；未来写入预留随已实际写入的字节减少。 */

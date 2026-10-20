@@ -94,6 +94,8 @@ docker run -d --name pipeline-worker --restart unless-stopped \
 | `PIPELINE_WORKER_PREPARE_CONCURRENCY` | 同时接收并准备任务上限，默认 2；没有等待重材料的队列 |
 | `PIPELINE_WORKER_FREE_BYTES` | 扣除未实际消耗预留后的可用磁盘安全余量，默认 4 GiB |
 | `PIPELINE_WORKER_JOB_RESERVE_BYTES` | 每个准备／执行中任务的保守增长预留，默认 1 GiB |
+| `PIPELINE_WORKER_STEP_TIMEOUT_MS` | 单个 CLI 步骤（init、status、prepare、render 等）的墙钟上限，默认 600000（10 分钟）；超时后终止整个进程组，任务记为 `failed` |
+| `PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS` | publish 步骤的墙钟上限，默认 600000；超时无法确认是否已写入微信，任务记为 `interrupted` |
 | `PIPELINE_ARTICLE_EXPORT_ENGINE` | 正文 HTML 导出引擎，`chrome`（默认）或 `dom`。`dom` 在独立 Bun 子进程中用 happy-dom 运行同一导出 bundle，不启动 Chrome；取值非法时 Worker 启动失败。当前值见 `/health.capabilities.articleExportEngine` |
 
 Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过子进程环境注入；不接受在任务正文参数里传入凭据。Pipeline 基础配置中的账号可提供样式，但当前 Worker 不会用它替代账号存储中的注册。
@@ -128,7 +130,7 @@ Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过�
 
 定向检查由主控执行：`bun test services/cloud-worker/capacity.test.ts services/cloud-worker/acceptance.test.ts services/cloud-worker/server.test.ts services/cloud-worker/preview.test.ts src/logger.test.ts src/monitor.test.ts`。真实 Worker／CLI 预览用例仍需显式字体与 Chrome，不能用本地通过替代正式草稿验收。
 
-发布子进程已经启动后，`WX_RESULT_UNKNOWN`、stdout 超限终止、响应缺失或 JSON 不完整都保留为 `interrupted`；完整 CLI 结果明确为失败且无未知写入时才记 `failed`。已取得成功 receipt 后的状态读取或完整性校验失败同样保留 receipt 和 `interrupted`。发布前空间、素材、模板或 hash 校验失败仍为 `failed`。Worker 不自动重排这些原 job/run，调用后端继续保留 unresolved active，核对原状态和草稿箱后再决定处置；定向回归见 `services/cloud-worker/uncertainty.test.ts`。
+每个 CLI 子进程在独立进程组中运行，步骤超时、stdout 超限或步骤结束时都会终止整个进程组，Chrome 等孙进程不会残留或占住串行队列。发布子进程已经启动后，`WX_RESULT_UNKNOWN`、publish 步骤超时、stdout 超限终止、响应缺失或 JSON 不完整都保留为 `interrupted`；完整 CLI 结果明确为失败且无未知写入时才记 `failed`。已取得成功 receipt 后的状态读取或完整性校验失败同样保留 receipt 和 `interrupted`。发布前空间、素材、模板或 hash 校验失败仍为 `failed`。Worker 不自动重排这些原 job/run，调用后端继续保留 unresolved active，核对原状态和草稿箱后再决定处置；定向回归见 `services/cloud-worker/uncertainty.test.ts` 与 `services/cloud-worker/timeout.test.ts`。
 
 ### 正文样式快照
 
