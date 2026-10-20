@@ -37,7 +37,8 @@ if(command==="init") {
   const environment = { ...process.env, PIPELINE_WORKER_HOST: "127.0.0.1", PIPELINE_WORKER_PORT: "0", PIPELINE_WORKER_TOKEN: "timeout-test",
     PIPELINE_WORKSPACE_ROOT: root, PIPELINE_WORKER_STATE_FILE: join(root, "jobs.json"), PIPELINE_WORKER_ACCOUNT_STATE_FILE: join(root, "accounts.json"),
     PIPELINE_WORKER_FREE_BYTES: "1", PIPELINE_WORKER_JOB_RESERVE_BYTES: "1", BUN_BIN: runner,
-    PIPELINE_WORKER_STEP_TIMEOUT_MS: "500", PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS: "500" };
+    // 超时同样作用于 init/status，留足负载下 CLI 启动的余量，只让卡住的步骤触发超时。
+    PIPELINE_WORKER_STEP_TIMEOUT_MS: "2000", PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS: "2000" };
   const child = Bun.spawn([process.execPath, join(import.meta.dir, "server.ts")], { env: environment, stdout: "pipe", stderr: "inherit" });
   try {
     const reader = child.stdout.getReader(); const { value } = await reader.read(); reader.releaseLock();
@@ -63,9 +64,9 @@ if(command==="init") {
       }
     }
     expect(jobs.hang).toMatchObject({ status: "failed", runId: "run-hang" });
-    expect(jobs.hang.error).toContain("prepare timed out after 500ms");
+    expect(jobs.hang.error).toContain("prepare timed out after 2000ms");
     expect(jobs["publish-hang"]).toMatchObject({ status: "interrupted", runId: "run-publish-hang" });
-    expect(jobs["publish-hang"].error).toContain("publish timed out after 500ms");
+    expect(jobs["publish-hang"].error).toContain("publish timed out after 2000ms");
     expect(jobs.after.status).toBe("failed");
     expect(jobs.after.error).toContain("fixture step failed");
     for (const scenario of ["hang", "publish-hang"]) {
