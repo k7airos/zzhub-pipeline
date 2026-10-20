@@ -398,7 +398,7 @@ Rendering requires headless Chrome. `findChrome()` in `src/imgx/runtime.ts` prob
 3. `google-chrome` from PATH
 4. `chromium` from PATH
 
-The built-in image renderer and built-in/myno HTML export require Chrome. The Typeset Studio image renderer uses native Canvas without Chrome. The built-in markdown renderer and Pipeline's browser-plugin host check Chrome through `doctor()`.
+The built-in image renderer and built-in/myno HTML export require Chrome. The Typeset Studio image renderer uses native Canvas without Chrome. Setting `PIPELINE_ARTICLE_EXPORT_ENGINE=dom` runs the same HTML export bundle in a happy-dom subprocess (`src/wechat-preview/dom-export*.ts`) instead of Chrome; `src/wechat-preview/dom-export.equivalence.test.ts` requires both engines to produce the same canonical DOM. Renderer code must use simple selectors and must not rely on browser-only CSSOM normalization. The built-in markdown renderer and Pipeline's browser-plugin host check Chrome through `doctor()`.
 
 Viewport inset quirk: Chrome CLI `--window-size=900,1200` does not guarantee `innerHeight=1200`. The runtime measures the real inset, over-captures, then crops. If a footer looks clipped, check this layer first, not the template CSS.
 

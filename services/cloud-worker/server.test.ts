@@ -20,6 +20,7 @@ test("worker defaults to loopback and authenticates health and job requests", as
     PIPELINE_WORKER_TOKEN: "test-worker-token",
     PIPELINE_WORKSPACE_ROOT: root,
     PIPELINE_WORKER_STATE_FILE: join(root, "jobs.json"),
+    PIPELINE_ARTICLE_EXPORT_ENGINE: "dom",
   };
   await writeFile(`${env.PIPELINE_WORKER_STATE_FILE}.maintenance.json`, "true");
   const child = Bun.spawn(command, { env, stdout: "pipe", stderr: "inherit" });
@@ -35,7 +36,7 @@ test("worker defaults to loopback and authenticates health and job requests", as
     expect((await fetch(`${url}/health`, { headers: { Authorization: "Bearer wrong" } })).status).toBe(401);
     expect((await fetch(`${url}/health`, { headers })).status).toBe(200);
     expect((await (await fetch(`${url}/health`, { headers })).json()).capabilities.articleStyleSchemaVersions).toEqual([1, 2]);
-    expect(await (await fetch(`${url}/health`, { headers })).json()).toMatchObject({ accepting: 0, preparing: 0, assetWrites: 0, capabilities: { jobLookupByIdempotencyKey: true } });
+    expect(await (await fetch(`${url}/health`, { headers })).json()).toMatchObject({ accepting: 0, preparing: 0, assetWrites: 0, capabilities: { jobLookupByIdempotencyKey: true, articleExportEngine: "dom" } });
     expect((await fetch(`${url}/v1/jobs/by-idempotency-key?idempotencyKey=absent&account=test`, { headers })).status).toBe(404);
     expect((await fetch(`${url}/v1/jobs/by-idempotency-key?idempotencyKey=a&idempotencyKey=b&account=test`, { headers })).status).toBe(400);
     expect((await fetch(`${url}/v1/jobs/missing`)).status).toBe(401);

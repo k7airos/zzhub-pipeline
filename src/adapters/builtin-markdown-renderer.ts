@@ -7,6 +7,7 @@
 
 import { exportMarkdownToWechatHtml } from "../wechat-preview";
 import { findChrome } from "../imgx/runtime";
+import { resolveArticleExportEngine } from "../wechat-preview/dom-export";
 import { notifyProgress } from "../monitor/recorder";
 import type {
   MarkdownRenderPlugin,
@@ -21,6 +22,9 @@ export const builtinMarkdownRenderer: MarkdownRenderPlugin = {
 
   async doctor(): Promise<PipelinePluginDoctorCheck[]> {
     const checks: PipelinePluginDoctorCheck[] = [];
+    if (resolveArticleExportEngine() === "dom") {
+      return [{ name: "chrome", ok: true, message: "not required (PIPELINE_ARTICLE_EXPORT_ENGINE=dom)" }];
+    }
 
     // Check Chrome/Chromium
     const chromePath = findChrome();

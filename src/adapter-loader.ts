@@ -19,6 +19,7 @@ import { PluginBrowserSchema, PluginDoctorSchema, PluginImageOutputSchema, Plugi
 import { exportMarkdownToWechatHtml } from "./wechat-preview";
 import { notifyProgress } from "./monitor/recorder";
 import { findChrome } from "./imgx/runtime";
+import { resolveArticleExportEngine } from "./wechat-preview/dom-export";
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -81,8 +82,12 @@ export async function resolveMarkdownRenderer(
       ...(metadata.hasDoctor || metadata.hasBrowser ? { doctor: async () => {
         const checks = metadata.hasDoctor ? await runExternalPlugin(pluginPath, "doctor", PluginDoctorSchema, undefined, { options }) : [];
         if (metadata.hasBrowser) {
-          const chrome = findChrome();
-          checks.push({ name: "chrome", ok: Boolean(chrome), message: chrome ?? "Chrome/Chromium not found" });
+          if (resolveArticleExportEngine() === "dom") {
+            checks.push({ name: "chrome", ok: true, message: "not required (PIPELINE_ARTICLE_EXPORT_ENGINE=dom)" });
+          } else {
+            const chrome = findChrome();
+            checks.push({ name: "chrome", ok: Boolean(chrome), message: chrome ?? "Chrome/Chromium not found" });
+          }
         }
         return checks;
       } } : {}),

@@ -94,6 +94,7 @@ docker run -d --name pipeline-worker --restart unless-stopped \
 | `PIPELINE_WORKER_PREPARE_CONCURRENCY` | 同时接收并准备任务上限，默认 2；没有等待重材料的队列 |
 | `PIPELINE_WORKER_FREE_BYTES` | 扣除未实际消耗预留后的可用磁盘安全余量，默认 4 GiB |
 | `PIPELINE_WORKER_JOB_RESERVE_BYTES` | 每个准备／执行中任务的保守增长预留，默认 1 GiB |
+| `PIPELINE_ARTICLE_EXPORT_ENGINE` | 正文 HTML 导出引擎，`chrome`（默认）或 `dom`。`dom` 在独立 Bun 子进程中用 happy-dom 运行同一导出 bundle，不启动 Chrome；取值非法时 Worker 启动失败。当前值见 `/health.capabilities.articleExportEngine` |
 
 Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过子进程环境注入；不接受在任务正文参数里传入凭据。Pipeline 基础配置中的账号可提供样式，但当前 Worker 不会用它替代账号存储中的注册。
 

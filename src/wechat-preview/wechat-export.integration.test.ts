@@ -48,7 +48,8 @@ describe("semantic WeChat HTML export", () => {
     expect(html).not.toContain("currentcolor");
     // 引用导出为 section（规避微信编辑器对原生 blockquote 的强制灰色左边框），样式全靠内联
     expect(html).not.toContain("<blockquote");
-    expect(html).toContain("border-left: 3px solid");
+    // Chrome 合并为单边简写，DOM 引擎保留单值属性，两者都是公众号可解析的单边写法。
+    expect(html).toMatch(/border-left: 3px solid|border-left-width: 3px; border-left-style: solid/);
     expect(html).toContain("Advice</strong>");
     expect(html).toMatch(/background-color: (?:#1f7a4d|rgb\(31, 122, 77\))/);
   }, 30_000);
@@ -62,7 +63,7 @@ describe("semantic WeChat HTML export", () => {
       themeOverrides: { syntaxPresets: { h2: "pillar" } },
     });
     const h2Tag = html.match(/<section[^>]*>(?:<span[^>]*>[^<]*<\/span>)*竖条标题/)?.[0] ?? "";
-    expect(h2Tag).toContain("border-left: 4px solid");
+    expect(h2Tag).toMatch(/border-left: 4px solid|border-left-width: 4px; border-left-style: solid/);
   }, 30_000);
 
   test.skipIf(findChrome() === null)("Studio saves and resets the same style and ignores stale renders", async () => {

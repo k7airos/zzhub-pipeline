@@ -717,11 +717,16 @@ const BORDER_SIDES = ["top", "right", "bottom", "left"] as const;
  */
 function normalizeBorderShorthands(element: HTMLElement): void {
   const style = element.style;
+  // 简写省略的分量：Chrome 给出初始值，happy-dom 保留 initial 关键字；统一按初始值处理。
+  const value = (property: string, initial: string) => {
+    const raw = style.getPropertyValue(property);
+    return raw === "initial" ? initial : raw;
+  };
   const sides = BORDER_SIDES.map((side) => ({
     side,
-    width: style.getPropertyValue(`border-${side}-width`),
-    style: style.getPropertyValue(`border-${side}-style`),
-    color: style.getPropertyValue(`border-${side}-color`),
+    width: value(`border-${side}-width`, "medium"),
+    style: value(`border-${side}-style`, "none"),
+    color: value(`border-${side}-color`, "currentcolor"),
   }));
 
   const invisible = (entry: (typeof sides)[number]) => entry.style === "none" || entry.style === "hidden";

@@ -11,6 +11,7 @@ import {
   renderTemplate,
 } from "../imgx/runtime";
 import { ChromeRenderError, dumpReadyHtml } from "../imgx/chrome-render";
+import { DomExportError, exportInDom, resolveArticleExportEngine, type ArticleExportEngine } from "./dom-export";
 import {
   PACKAGE_ROOT,
   TEMPLATE_PATH,
@@ -40,6 +41,7 @@ interface BundleAssets {
 export type WechatExportErrorKind =
   | "chrome_missing"
   | "chrome_failed"
+  | "dom_failed"
   | "timeout"
   | "render_error"
   | "bundle"
@@ -47,6 +49,7 @@ export type WechatExportErrorKind =
 
 export interface WechatExportDebugInfo {
   chrome_path?: string;
+  engine?: ArticleExportEngine;
   virtual_time_budget_ms?: number;
   timeout_ms?: number;
   bundle_stale?: boolean;
@@ -366,6 +369,7 @@ export async function exportMarkdownToWechatHtml(
   const timeoutMs = input.timeoutMs && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0 ? input.timeoutMs : 15_000;
   const title = input.title ?? "Wechat Preview Export";
   let chromePath: string | undefined;
+  let engine: ArticleExportEngine | undefined;
   let bundleRebuilt = false;
   let bundleStale = false;
 
@@ -382,6 +386,7 @@ export async function exportMarkdownToWechatHtml(
       markdownPath: input.markdownPath,
       debug: {
         chrome_path: chromePath,
+        engine,
         timeout_ms: timeoutMs,
         bundle_stale: bundleStale,
         bundle_rebuilt: bundleRebuilt,
@@ -391,19 +396,27 @@ export async function exportMarkdownToWechatHtml(
     });
 
   try {
-    const foundChrome = findChrome();
-    if (!foundChrome) {
-      throw makeError(
-        "chrome_missing",
-        "Chrome/Chromium not found. Required for WeChat HTML export.\n" +
-          "Install one of:\n" +
-          "  macOS:   brew install --cask chromium\n" +
-          "  Ubuntu:  sudo apt install chromium-browser\n" +
-          "  Or install Google Chrome from https://www.google.com/chrome/\n" +
-          "  Or set CHROME_PATH environment variable to the binary path.",
-      );
+    try {
+      engine = resolveArticleExportEngine();
+    } catch (error) {
+      throw makeError("other", error instanceof Error ? error.message : String(error));
     }
-    chromePath = foundChrome;
+    // DOM 引擎在子进程中运行导出 bundle，不需要 Chrome。
+    if (engine === "chrome") {
+      const foundChrome = findChrome();
+      if (!foundChrome) {
+        throw makeError(
+          "chrome_missing",
+          "Chrome/Chromium not found. Required for WeChat HTML export.\n" +
+            "Install one of:\n" +
+            "  macOS:   brew install --cask chromium\n" +
+            "  Ubuntu:  sudo apt install chromium-browser\n" +
+            "  Or install Google Chrome from https://www.google.com/chrome/\n" +
+            "  Or set CHROME_PATH environment variable to the binary path.",
+        );
+      }
+      chromePath = foundChrome;
+    }
 
     let bundle: BundleAssets;
     try {
@@ -430,17 +443,16 @@ export async function exportMarkdownToWechatHtml(
       : "";
     const customCss = [presetsCss, articleTheme?.css, input.customCss ? await readFile(input.customCss, "utf-8") : ""].filter(Boolean).join("\n\n");
     const shell = readUtf8(TEMPLATE_PATH);
-    const payloadJson = escapeInlineJson(
-      JSON.stringify({
-        markdown,
-        assetBaseUrl: pathToFileURL(`${dirname(resolve(input.markdownPath))}/`).href,
-        editorVars: theme.editorVars,
-        exportTheme: theme.exportTheme,
-        syntaxPresets,
-        customCss,
-        structure,
-      }),
-    );
+    const payload = {
+      markdown,
+      assetBaseUrl: pathToFileURL(`${dirname(resolve(input.markdownPath))}/`).href,
+      editorVars: theme.editorVars,
+      exportTheme: theme.exportTheme,
+      syntaxPresets,
+      customCss,
+      structure,
+    };
+    const payloadJson = escapeInlineJson(JSON.stringify(payload));
 
     const shellHtml = renderTemplate(shell, {
       "{{PAGE_TITLE}}": escapeHtml(title),
@@ -450,14 +462,20 @@ export async function exportMarkdownToWechatHtml(
     });
 
     let dumpedDom: string;
+    let domResult: ExtractedRenderResult | undefined;
     try {
-      dumpedDom = await dumpReadyHtml({
-        chromePath,
-        html: shellHtml,
-        timeoutMs,
-      });
+      if (engine === "dom") {
+        domResult = await exportInDom({ scriptPath: bundle.scriptPath, payload, baseUrl: payload.assetBaseUrl, timeoutMs });
+        dumpedDom = JSON.stringify(domResult);
+      } else {
+        dumpedDom = await dumpReadyHtml({
+          chromePath: chromePath!,
+          html: shellHtml,
+          timeoutMs,
+        });
+      }
     } catch (error) {
-      if (error instanceof ChromeRenderError) {
+      if (error instanceof ChromeRenderError || error instanceof DomExportError) {
         if (input.debugDir) {
           await writeDebugArtifacts(input.debugDir, {
             "00-payload-markdown.md": markdown,
@@ -481,14 +499,14 @@ export async function exportMarkdownToWechatHtml(
         });
       }
       throw makeError(
-        "chrome_failed",
+        engine === "dom" ? "dom_failed" : "chrome_failed",
         error instanceof Error ? error.message : String(error),
       );
     }
 
     let result: ExtractedRenderResult;
     try {
-      result = extractRenderResult(dumpedDom);
+      result = domResult ?? extractRenderResult(dumpedDom);
     } catch (error) {
       if (input.debugDir) {
         await writeDebugArtifacts(input.debugDir, {

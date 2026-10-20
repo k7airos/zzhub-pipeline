@@ -12,6 +12,7 @@ import { maxAssetBytes, putBodyAsset } from "./assets";
 import { prepareArticleMaterials, readPreparedArticle } from "./job-materials";
 import { readArtifact } from "./artifacts";
 import { WorkerCapacity, WorkerLimitError } from "./capacity";
+import { resolveArticleExportEngine } from "../../src/wechat-preview/dom-export";
 
 // 正文最多 2 MiB，另预留一张 1 MiB JPEG 的 base64 与模板 JSON。
 const maxJobRequestBytes = 4_500_000;
@@ -164,6 +165,8 @@ async function main(): Promise<void> {
     throw new Error("PIPELINE_WORKER_TOKEN is required");
   if (!["127.0.0.1", "::1", "localhost"].includes(host) && !privateNetwork)
     throw new Error("PIPELINE_WORKER_HOST must be loopback unless PIPELINE_WORKER_PRIVATE_NETWORK=1");
+  // 导出引擎配置错误时启动即失败，不等到首个任务。
+  resolveArticleExportEngine();
   await mkdir(workspaceRoot, { recursive: true });
   await store.load();
   await accounts.load();
@@ -194,7 +197,7 @@ async function main(): Promise<void> {
       if (url.pathname === "/health" && request.method === "GET")
         return json({ service: "zzhub-pipeline-worker", status: "ok", queued: queue.length, running: draining, accepting: [...store.jobs.values()].filter(job => job.status === "accepting").length,
           preparing: capacity.preparingCount, assetWrites, accounts: accounts.accounts.size, maintenance,
-          capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, ...await coverCapabilities() } });
+          capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, articleExportEngine: resolveArticleExportEngine(), ...await coverCapabilities() } });
 
       try {
         const assetMatch = url.pathname.match(/^\/v1\/assets\/([a-f\d]{64})$/);

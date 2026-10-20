@@ -1,6 +1,7 @@
 export type PreviewErrorKind =
   | "chrome_missing"
   | "chrome_failed"
+  | "dom_failed"
   | "timeout"
   | "render_error"
   | "bundle"

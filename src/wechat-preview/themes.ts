@@ -58,6 +58,7 @@ function buildContainerStyle(options: {
     `line-height: ${options.lineHeight ?? "1.84"}`,
     `letter-spacing: ${options.letterSpacing ?? "0.012em"}`,
     "-webkit-text-size-adjust: 100%",
+    "text-size-adjust: 100%",
   ].join("; ");
 }
 

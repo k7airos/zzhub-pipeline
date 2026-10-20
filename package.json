@@ -31,9 +31,11 @@
   },
   "dependencies": {
     "@akairos/milkdown-article-plugins": "^0.1.6",
-    "@akairos/myno": "0.4.6",
+    "@akairos/myno": "0.4.7",
     "@akairos/typeset-studio": "0.4.0",
     "@chenglou/pretext": "0.0.8",
+    "@happy-dom/global-registrator": "21.0.3",
+    "happy-dom": "21.0.3",
     "image-size": "^2.0.2",
     "pngjs": "^7.0.0",
     "remark": "^15.0.1",
