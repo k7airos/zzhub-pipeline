@@ -58,6 +58,19 @@ async function publicJob(job: StoredCloudJob): Promise<Record<string, unknown>> 
   return { ...safeJob, bodyHash: job.bodyHash ?? createHash("sha256").update(job.body).digest("hex"), input: { ...job.input }, ...progress };
 }
 
+/** 巡检用的队列与清理概况，不含正文、凭据或输入内容。 */
+function healthDetails() {
+  const jobs = [...store.jobs.values()];
+  const running = runningJobId ? store.get(runningJobId) : null;
+  const queuedSince = jobs.filter(job => job.status === "queued").map(job => job.updatedAt).sort()[0] ?? null;
+  return {
+    runningJob: running ? { id: running.id, step: running.step, startedAt: running.startedAt } : null,
+    oldestQueuedAt: queuedSince,
+    previewReady: jobs.filter(job => job.status === "preview_ready").length,
+    retention: { terminalDays: workerLimits.terminalRetentionDays, previewTtlHours: workerLimits.previewTtlHours, ...retentionStatus },
+  };
+}
+
 function validateInput(value: unknown): CloudJobInput {
   if (!value || typeof value !== "object")
     throw new Error("Request body must be an object");
@@ -130,16 +143,20 @@ function requestHash(input: CloudJobInput): string {
 
 const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 let retentionRunning = false;
+let runningJobId: string | null = null;
+const retentionStatus = { lastRunAt: null as string | null, lastExpired: 0, lastPruned: 0 };
 
 /** 定期收尾：过期未确认的预览，再把超过保留期的终态任务墓碑化。维护模式下不改动任务，保证备份期间存储稳定。 */
 async function runRetention(): Promise<void> {
   if (retentionRunning || maintenance) return;
   retentionRunning = true;
+  let expired = 0, pruned = 0;
   try {
     const now = new Date();
     for (const job of expiredPreviews(store.jobs.values(), now.getTime(), workerLimits.previewTtlHours * 60 * 60 * 1000)) {
       closePreview(job, "expired", now);
       await store.set(job);
+      expired += 1;
     }
     const days = workerLimits.terminalRetentionDays;
     for (const job of prunableJobs(store.jobs.values(), now.getTime(), days, id => capacity.isReserved(id))) {
@@ -148,7 +165,9 @@ async function runRetention(): Promise<void> {
       catch (error) { console.error(`worker retention could not remove job ${job.id}`, error); continue; }
       pruneJob(job, days, now);
       await store.set(job);
+      pruned += 1;
     }
+    Object.assign(retentionStatus, { lastRunAt: now.toISOString(), lastExpired: expired, lastPruned: pruned });
   } finally {
     retentionRunning = false;
   }
@@ -165,6 +184,7 @@ async function drain(): Promise<void> {
       if (!job || job.status !== "queued")
         continue;
       job.status = "running";
+      runningJobId = job.id;
       job.startedAt = new Date().toISOString();
       job.step = "starting";
       await store.set(job);
@@ -180,6 +200,7 @@ async function drain(): Promise<void> {
         await store.set(job);
       } finally {
         capacity.releaseJob(job.id);
+        runningJobId = null;
       }
     }
   } finally {
@@ -225,7 +246,7 @@ async function main(): Promise<void> {
         return json({ error: "unauthorized" }, 401);
       if (url.pathname === "/health" && request.method === "GET")
         return json({ service: "zzhub-pipeline-worker", status: "ok", queued: queue.length, running: draining, accepting: [...store.jobs.values()].filter(job => job.status === "accepting").length,
-          preparing: capacity.preparingCount, assetWrites, accounts: accounts.accounts.size, maintenance,
+          preparing: capacity.preparingCount, assetWrites, accounts: accounts.accounts.size, maintenance, ...healthDetails(),
           capabilities: { articleStyleSchemaVersions: [1, 2], articleSnapshotSchemaVersions: [1], previewConfirm: true, previewDiscard: true, terminalRetention: true, bodyAssetUpload: true, jobLookupByIdempotencyKey: true, articleExportEngine: resolveArticleExportEngine(), ...await coverCapabilities() } });
 
       try {

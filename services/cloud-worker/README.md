@@ -102,6 +102,27 @@ docker run -d --name pipeline-worker --restart unless-stopped \
 
 Worker 每次执行从账号存储读取 `appId`、`appSecret`、`pat`，通过子进程环境注入；不接受在任务正文参数里传入凭据。Pipeline 基础配置中的账号可提供样式，但当前 Worker 不会用它替代账号存储中的注册。
 
+### 内存上限与巡检
+
+Worker 串行执行任务，内存峰值出现在预览阶段（CLI 进程、封面与图片处理、正文导出）。`scripts/worker-probe.ts` 在全新、关闭 swap 的限内存容器中走完整的“预览 → 确认 → 草稿”流程（微信中转为计数替身），报告各阶段 `anon + shmem + kernel` 峰值（回收页缓存后仍需的内存）、OOM 次数、耗时与磁盘占用：
+
+```bash
+bun scripts/worker-probe.ts --build --memory 768m --out tmp/probe.json
+```
+
+2026-10-20 在 arm64 Docker（镜像 `aeb8b2c`）上的结果，v2 完整样式 + 预渲染封面：
+
+| 场景 | 引擎 | 空闲 | 预览峰值 | 发布峰值 | 512m | 640m |
+| --- | --- | --- | --- | --- | --- | --- |
+| 短文 1 图 | chrome | 87 MiB | 351 MiB | 181 MiB | — | — |
+| 短文 1 图 | dom | 90 MiB | 367 MiB | 192 MiB | — | — |
+| 约 2 万字 20 图 | chrome | 87 MiB | 488–512 MiB | 305–341 MiB | 通过 | 通过 |
+| 约 2 万字 20 图 | dom | 89 MiB | 521–559 MiB | 301–317 MiB | 导出子进程 OOM，任务 `failed` | 通过 |
+
+据此建议每个 Worker 设 `mem_limit: 768m`，并保持默认的 `chrome` 引擎：在该负载下 Chrome 共享内存只有约 8 MiB，happy-dom 子进程并不更省内存。生产主机为 amd64 时，上线后用 `docker stats --no-stream` 在一篇长文预览期间复核。内存不足时 cgroup 先终止占用最大的子进程，Worker 主进程和容器不重启，任务记为 `failed`；不需要额外的 `shm_size`。长文任务目录约 30 MiB，素材缓存约 10 MiB，墓碑化前 `jobs.json` 每个长文任务约 80 KiB。
+
+`/health` 除队列计数外还提供巡检字段（不含正文、输入或凭据）：`runningJob`（`{ id, step, startedAt }` 或 `null`）、`oldestQueuedAt`（排队最久任务进入队列的时间）、`previewReady`（待确认预览数）、`retention`（`terminalDays`、`previewTtlHours`、`lastRunAt`、`lastExpired`、`lastPruned`）。建议巡检在 `runningJob.startedAt` 超过 20 分钟或 `oldestQueuedAt` 超过 30 分钟时告警；单步骤已有 `PIPELINE_WORKER_STEP_TIMEOUT_MS` 上限，超出说明 Worker 本身异常。
+
 ## HTTP API
 
 下列 curl 示例用于本机监听或宿主机回环映射；在业务后端容器中将地址换为 `http://pipeline-worker:18887`。

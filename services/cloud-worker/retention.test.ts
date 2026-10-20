@@ -195,6 +195,9 @@ describe("preview discard and expiry over HTTP", () => {
     await withWorker([previewJob("stale"), fresh], { PIPELINE_WORKER_PREVIEW_TTL_HOURS: "1" }, async (url) => {
       expect(await (await fetch(`${url}/v1/jobs/stale`, { headers })).json()).toMatchObject({ status: "failed", step: "expired", error: PREVIEW_EXPIRED });
       expect((await (await fetch(`${url}/v1/jobs/fresh`, { headers })).json()).status).toBe("preview_ready");
+      expect(await (await fetch(`${url}/health`, { headers })).json()).toMatchObject({
+        previewReady: 1, retention: { terminalDays: 0, previewTtlHours: 1, lastExpired: 1, lastPruned: 0 },
+      });
     });
     await withWorker([previewJob("off")], {}, async (url) => {
       expect((await (await fetch(`${url}/v1/jobs/off`, { headers })).json()).status).toBe("preview_ready");

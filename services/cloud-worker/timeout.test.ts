@@ -55,6 +55,15 @@ if(command==="init") {
       expect(response.status).toBe(202);
       ids[scenario] = (await response.json()).id;
     }
+    // 卡住期间巡检字段指向当前任务，并能看到排队等待的任务。
+    let health: any;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      health = await (await fetch(`${url}/health`, { headers })).json();
+      if (health.runningJob?.step === "prepare") break;
+      await Bun.sleep(10);
+    }
+    expect(health.runningJob).toMatchObject({ id: ids.hang, step: "prepare" });
+    expect(typeof health.oldestQueuedAt).toBe("string");
     const jobs: Record<string, any> = {};
     for (const [scenario, id] of Object.entries(ids)) {
       for (let attempt = 0; attempt < 400; attempt++) {
@@ -68,6 +77,7 @@ if(command==="init") {
     expect(jobs["publish-hang"]).toMatchObject({ status: "interrupted", runId: "run-publish-hang" });
     expect(jobs["publish-hang"].error).toContain("publish timed out after 2000ms");
     expect(jobs.after.status).toBe("failed");
+    expect(await (await fetch(`${url}/health`, { headers })).json()).toMatchObject({ runningJob: null, oldestQueuedAt: null });
     expect(jobs.after.error).toContain("fixture step failed");
     for (const scenario of ["hang", "publish-hang"]) {
       const pid = Number(await readFile(join(root, "jobs", ids[scenario]!, "grandchild.pid"), "utf8"));
