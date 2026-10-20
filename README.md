@@ -78,8 +78,8 @@ cd zzhub-pipeline
 bun install
 bun run src/cli.ts --help
 
-# 可选：把当前源码安装成全局命令
-bun install --global .
+# 可选：把全局命令链接到当前源码，修改后立即生效，无需重装
+bun link
 ```
 
 两个命令别名都可用：

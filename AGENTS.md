@@ -21,7 +21,7 @@ WeChat `publish` creates or updates drafts; it does not send or publicly publish
 ```bash
 # Run any CLI command directly from source (always up-to-date, no rebuild needed)
 bun run src/cli.ts <command> [options]
-# Global commands run the installed package (refresh with bun install --global .)
+# Global commands run this checkout through bun link (no reinstall after edits)
 zzhub-pipeline <command> [options]
 zzp <command> [options]
 
@@ -46,11 +46,13 @@ bun run release:minor   # new feature (1.x+ only: 1.2.3 → 1.3.0)
 npm publish
 ```
 
-**Important:** `bun run src/cli.ts` runs the current checkout. The current npm `bin` entries point to `src/cli.ts` with a Bun shebang. Global `zzp` / `zzhub-pipeline` use the installed package, not necessarily this checkout. `bun run build:npm` separately produces `dist/cli.js`; global installation does not select or build that bundle.
+**Important:** `bun run src/cli.ts` runs the current checkout. The current npm `bin` entries point to `src/cli.ts` with a Bun shebang. Global `zzp` / `zzhub-pipeline` run this checkout when it is registered with `bun link`; an npm-installed package runs its own copy instead. `bun run build:npm` separately produces `dist/cli.js`; neither path selects or builds that bundle.
 
-> **强制性规则：任何代码修改完成后，必须立即执行 `bun install --global .`**
+> **全局命令通过 `bun link` 指向本仓库，代码修改后无需重新安装。**
 >
-> 这是不可跳过的硬性步骤。全局 `zzp` 使用已安装包内的源码与浏览器资源；不执行 `bun install --global .` 可能继续使用旧副本。浏览器渲染源码或共享 CSS 变化时，先执行 `bun run build:wechat-preview`。即使是改一行代码、加一个字段、修一个 typo 也必须执行全局安装。编辑 .md 文档文件除外。
+> 在仓库根目录执行一次 `bun link`：`~/.bun/install/global/node_modules/@akairos/pipeline` 是指向本仓库的软链接，全局 `zzp` / `zzhub-pipeline` 直接运行当前源码（包括未提交的改动），依赖从本仓库的 `node_modules` 解析。依赖变化后在本仓库执行 `bun install`；浏览器渲染源码或共享 CSS 变化时执行 `bun run build:wechat-preview`。
+>
+> 不要使用 `bun install --global .`：它会把整个仓库复制进全局目录，并在全局 `package.json` 写入 `"": "."` 这条自引用依赖，之后的全局安装会因 `DependencyLoop` 失败。用 `ls -l ~/.bun/install/global/node_modules/@akairos/pipeline` 检查链接；取消链接用 `bun unlink`。
 
 ## Agent workflow loop
 
