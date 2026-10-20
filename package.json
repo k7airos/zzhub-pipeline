@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@akairos/milkdown-article-plugins": "^0.1.6",
-    "@akairos/myno": "0.4.1",
+    "@akairos/myno": "0.4.6",
     "@akairos/typeset-studio": "0.4.0",
     "@chenglou/pretext": "0.0.8",
     "image-size": "^2.0.2",

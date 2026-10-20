@@ -348,11 +348,14 @@ const codeBlockRenderer: WechatElementRenderer = {
 
 const inlineCodeRenderer: WechatElementRenderer = {
   kind: "inline-code",
-  selector: "code:not(pre code)",
+  // 只用简单选择器，代码块判断放在 JS 里；happy-dom 等 DOM 实现不支持 :not() 内的组合器。
+  selector: "code",
   prepare(element) {
+    if (element.closest("pre")) return;
     setNodeKind(element, "inline-code");
   },
   finalize(element) {
+    if (element.closest("pre")) return;
     replaceTag(element, "span");
   },
 };
