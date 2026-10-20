@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.24.0
+
+### Features
+
+- Add an optional happy-dom article export engine (`PIPELINE_ARTICLE_EXPORT_ENGINE=dom`) that runs the same browser export bundle in an isolated Bun subprocess without Chrome; the default stays `chrome`. Equivalence tests require both engines, with the built-in and myno bundles, to produce the same canonical DOM across themes, every syntax preset, structure options, standalone themes, scaled images and long articles.
+- Time out each Worker CLI step (`PIPELINE_WORKER_STEP_TIMEOUT_MS`, `PIPELINE_WORKER_PUBLISH_STEP_TIMEOUT_MS`, default 10 minutes) and kill its whole process group on timeout, overflow or completion, so a grandchild such as Chrome can no longer hold the output pipe or block the serial queue.
+- Let callers discard unconfirmed previews with `POST /v1/jobs/:id/discard` and expire stale ones with `PIPELINE_WORKER_PREVIEW_TTL_HOURS`; both close the job as `failed`, and confirmation re-checks the preview after waiting for its reservation.
+- Tombstone `succeeded`/`failed` jobs after `PIPELINE_WORKER_TERMINAL_RETENTION_DAYS`: remove their workspace and bulky fields while keeping identity, request and body hashes and publish results, so idempotent submissions still resolve to the original job. Artifacts of tombstoned jobs return `410`.
+- Report `runningJob`, `oldestQueuedAt`, `previewReady` and retention status in `/health`, and advertise `previewDiscard`, `terminalRetention` and `articleExportEngine`.
+- Add `scripts/worker-probe.ts` to measure Worker memory, timing and disk use in memory-limited containers.
+
+### Fixes
+
+- Match inline code with a simple selector so code blocks render correctly in DOM implementations without `:not()` combinator support.
+- Declare standard `text-size-adjust` and read `initial` border components as initial values when expanding border shorthands.
+
+### Compatibility
+
+- Use myno 0.4.7, which carries the same renderer fixes. Retention, preview expiry and the DOM engine are off by default; existing deployments keep their behavior.
+
+## v0.23.1
+
+### Features
+
+- Accept v2 complete article styles and app-rendered 3350×1000 PNG cover snapshots for frozen article previews, and harden theme CSS resource validation.
+
 ## v0.23.0
 
 ### Features

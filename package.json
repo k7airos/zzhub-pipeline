@@ -1,6 +1,6 @@
 {
   "name": "@akairos/pipeline",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "type": "module",
   "license": "MIT",
   "bin": {
