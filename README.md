@@ -1,5 +1,7 @@
 # zzhub-pipeline
 
+> 🐾 想直接用？[兔狲 · 公众号助手（wx-publish-studio）](https://github.com/k7airos/wx-publish-studio) 是自托管的公众号图文工作台：写文章、配样式与封面、预览后存入你自己的公众号草稿箱，`docker compose up` 一条命令起全套。其中的 Worker 服务就是本仓库的云端 Worker。
+
 一个可恢复的内容发布工作流。它把 Markdown、图片、账号和发布意图组织成一条明确的流水线，生成微信公众号草稿，或把文章同步到自己的博客项目。
 
 Pipeline 可以独立使用，也可以作为 Web、App、桌面客户端背后的执行服务：
@@ -18,6 +20,7 @@ Pipeline 可以独立使用，也可以作为 Web、App、桌面客户端背后�
 
 | 项目 | 与 Pipeline 的关系 | 什么时候使用 |
 | --- | --- | --- |
+| [wx-publish-studio](https://github.com/k7airos/wx-publish-studio) | 自托管的公众号图文工作台；把本仓库的云端 Worker 作为 `worker` 服务随栈运行（镜像 `ghcr.io/k7airos/wx-pipeline-worker`），由应用提交发布任务 | 想要开箱即用的写作、预览、存草稿界面，而不是自己对接 Worker HTTP 接口 |
 | [myno](https://github.com/k7airos/myno) · [`@akairos/myno`](https://www.npmjs.com/package/@akairos/myno) | 可选的正文编辑、排版与 Studio 插件，配置 `plugins.markdownRenderer` | 交互调样式、导出独立配置、复制富文本；也能脱离 Pipeline 独立运行 |
 | [Typeset Studio](https://github.com/k7airos/typeset-studio) · [`@akairos/typeset-studio`](https://www.npmjs.com/package/@akairos/typeset-studio) | 图片渲染插件，配置 `plugins.imageRenderer` | 设计与渲染文章封面、贴图封面和多页内容图 |
 | [Milkdown Article Plugins](https://github.com/k7airos/milkdown-article-plugins) | Pipeline 与 myno 共用的语法、序列化和微信组件渲染 | 给自己的 Milkdown 宿主接入高亮、提示卡、徽章和快捷键 |
