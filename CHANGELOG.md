@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.24.1
+
+[compare changes](https://github.com/aatrooox/zzhub-pipeline/compare/v0.24.0...v0.24.1)
+
+### Fixes
+
+- **wechat:** Recreate deleted remote draft when update fails ([9598cb4](https://github.com/aatrooox/zzhub-pipeline/commit/9598cb4))
+
+### Documentation
+
+- **worker:** Add typical-article capacity measurements ([4cf5725](https://github.com/aatrooox/zzhub-pipeline/commit/4cf5725))
+- **readme:** 在显眼处引用 wx-publish-studio ([9945729](https://github.com/aatrooox/zzhub-pipeline/commit/9945729))
+
+### ❤️ Contributors
+
+- Kairos <gnakzz@qq.com>
+
 ## v0.24.0
 
 ### Features
