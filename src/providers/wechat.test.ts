@@ -73,6 +73,136 @@ test("贴图配文按 UTF-8 长度校验，上传前拒绝超限内容", async (
   await expect(createWechatNewspic({ content: "😀".repeat(512) + "a" } as any)).rejects.toThrow("贴图配文过长");
 });
 
+// 公众号后台删除草稿后，draft/update 会一直失败；worker 必须确认草稿丢失后降级为新建。
+describe("draft update with a remotely deleted draft", () => {
+  const png = new PNG({ width: 8, height: 8 });
+  png.data.fill(255);
+  const image = PNG.sync.write(png);
+  const dataUrl = `data:image/png;base64,${image.toString("base64")}`;
+
+  function startRelay(handlers: { update: () => Response; get: () => Response; add: () => Response }) {
+    const calls: Array<{ path: string; idempotencyKey: string | null; body: any }> = [];
+    const relay = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith("/token")) return Response.json({ accessToken: "test-token" });
+      if (path.includes("material")) return Response.json({ media_id: "cover-id", url: "https://mmbiz.example/cover.png" });
+      if (path.endsWith("/draft/get")) { calls.push({ path: "get", idempotencyKey: null, body: await request.json() }); return handlers.get(); }
+      if (path.endsWith("/draft/update")) { calls.push({ path: "update", idempotencyKey: request.headers.get("idempotency-key"), body: await request.json() }); return handlers.update(); }
+      if (path.endsWith("/draft/add")) { calls.push({ path: "add", idempotencyKey: request.headers.get("idempotency-key"), body: await request.json() }); return handlers.add(); }
+      return new Response("not found", { status: 404 });
+    } });
+    return { relay, calls, baseUrl: `http://127.0.0.1:${relay.port}` };
+  }
+
+  function withRelayEnv<T>(baseUrl: string, run: () => Promise<T>): Promise<T> {
+    const overrides = { ZZHUB_WX_BASE_URL: baseUrl, ZZCLUB_PAT: "test-pat", WX_APPID: "test-app", WX_APPSECRET: "test-secret" };
+    const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+    Object.assign(process.env, overrides);
+    return run().finally(() => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+  }
+
+  const goneReject = () => Response.json({ code: 9002, message: "invalid media_id", data: { wxErrcode: 40007, wxErrmsg: "invalid media_id" } }, { status: 400 });
+
+  test("article update recreates the draft and returns the new media id", async () => {
+    const { relay, calls, baseUrl } = startRelay({
+      update: goneReject,
+      get: goneReject,
+      add: () => Response.json({ media_id: "recreated-draft-id" }),
+    });
+    try {
+      const result = await withRelayEnv(baseUrl, () => createWechatDraft({
+        config: PipelineConfigSchema.parse({}),
+        title: "test",
+        html: "<p>body</p>",
+        photos: [dataUrl],
+        idempotencyKey: "original-key",
+        existingDraftMediaId: "deleted-draft-id",
+      }));
+      expect(result.isUpdate).toBe(true);
+      expect(result.recreated).toBe(true);
+      expect(result.originalDraftMediaId).toBe("deleted-draft-id");
+      expect(result.draftMediaId).toBe("recreated-draft-id");
+      expect(calls.map(call => call.path)).toEqual(["update", "get", "add"]);
+      expect(calls[0]!.idempotencyKey).toBe("original-key");
+      // 重建是新的外部写操作，必须换幂等键，不能与失败的 update 请求共用。
+      expect(calls[2]!.idempotencyKey).not.toBe("original-key");
+      expect(calls[2]!.idempotencyKey).toBeTruthy();
+      expect(calls[2]!.body.articles[0]).toMatchObject({ article_type: "news", title: "test" });
+    } finally {
+      relay.stop(true);
+    }
+  });
+
+  test("newspic update also recreates when the remote draft is gone", async () => {
+    const { relay, calls, baseUrl } = startRelay({
+      update: goneReject,
+      get: goneReject,
+      add: () => Response.json({ media_id: "recreated-newspic-id" }),
+    });
+    try {
+      const result = await withRelayEnv(baseUrl, () => createWechatNewspic({
+        config: PipelineConfigSchema.parse({}),
+        title: "test",
+        content: "配文",
+        photos: [dataUrl],
+        idempotencyKey: "newspic-key",
+        existingDraftMediaId: "deleted-newspic-id",
+      }));
+      expect(result.recreated).toBe(true);
+      expect(result.draftMediaId).toBe("recreated-newspic-id");
+      expect(calls.map(call => call.path)).toEqual(["update", "get", "add"]);
+      expect(calls[2]!.body.articles[0]).toMatchObject({ article_type: "newspic" });
+    } finally {
+      relay.stop(true);
+    }
+  });
+
+  test("keeps the original error when the draft still exists", async () => {
+    const { relay, calls, baseUrl } = startRelay({
+      update: goneReject,
+      get: () => Response.json({ news_item: [{ title: "test" }] }),
+      add: () => Response.json({ media_id: "should-not-happen" }),
+    });
+    try {
+      await expect(withRelayEnv(baseUrl, () => createWechatDraft({
+        config: PipelineConfigSchema.parse({}),
+        title: "test",
+        html: "<p>body</p>",
+        photos: [dataUrl],
+        existingDraftMediaId: "live-draft-id",
+      }))).rejects.toThrow("API request failed with status 400");
+      expect(calls.map(call => call.path)).toEqual(["update", "get"]);
+    } finally {
+      relay.stop(true);
+    }
+  });
+
+  test("keeps the original error when the probe cannot confirm the draft state", async () => {
+    const { relay, calls, baseUrl } = startRelay({
+      update: goneReject,
+      get: () => Response.json({ code: 9002, message: "upstream unavailable" }, { status: 503 }),
+      add: () => Response.json({ media_id: "should-not-happen" }),
+    });
+    try {
+      await expect(withRelayEnv(baseUrl, () => createWechatDraft({
+        config: PipelineConfigSchema.parse({}),
+        title: "test",
+        html: "<p>body</p>",
+        photos: [dataUrl],
+        existingDraftMediaId: "unknown-draft-id",
+      }))).rejects.toThrow("API request failed with status 400");
+      expect(calls.map(call => call.path)).toEqual(["update", "get"]);
+    } finally {
+      relay.stop(true);
+    }
+  });
+});
+
 describe("resolveDraftMediaId", () => {
   test("extracts media_id from a successful draft response", () => {
     expect(resolveDraftMediaId({ code: 0, data: { media_id: "media-1" } }))

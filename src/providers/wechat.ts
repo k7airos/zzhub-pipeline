@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "fs";
 import { basename, extname } from "path";
+import { createHash } from "node:crypto";
 import { imageSize } from "image-size";
 import { PipelineConfig, WxAccountConfig } from "../config";
 import { reportProgress } from "../monitor/recorder";
@@ -332,6 +333,10 @@ export async function readResponseBodyWithLimit(
 }
 
 /** 服务端错误只保留分类和脱敏提示，正文及凭据不进入 Pipeline 状态。 */
+class WxServiceHttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
 function serviceError(response: Response, payload: unknown, mutating: boolean): Error {
   const detail = asRecord(payload);
   const code = String(asRecord(detail.data).code || "WX_SERVICE_ERROR").replace(/[^A-Z0-9_]/g, "").slice(0, 80);
@@ -342,7 +347,7 @@ function serviceError(response: Response, payload: unknown, mutating: boolean): 
     .replace(/(["']?(?:access_token|token|pat|appSecret|secret)["']?\s*[:=]\s*)["']?[^\s"'&,}]+["']?/gi, "$1[redacted]");
   const requestId = response.headers.get("x-request-id") || String(detail.requestId || "");
   const trace = /^[a-zA-Z0-9_-]{1,100}$/.test(requestId) ? ` [request ${requestId}]` : "";
-  return new Error(`API request failed with status ${response.status}: ${code}: ${message.slice(0, 300)}${trace}`);
+  return new WxServiceHttpError(response.status, `API request failed with status ${response.status}: ${code}: ${message.slice(0, 300)}${trace}`);
 }
 
 function unknownResult(): Error {
@@ -384,6 +389,57 @@ async function requestFormData(
   timeout: number,
 ): Promise<unknown> {
   return requestWechat(url, options, timeout);
+}
+
+async function postDraft(
+  runtime: WxRuntimeConfig,
+  draftPath: string,
+  draftBody: unknown,
+  idempotencyKey: string | undefined,
+  timeout: number,
+): Promise<unknown> {
+  return requestJson(
+    `${runtime.baseUrl}${draftPath}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${runtime.pat}`,
+        ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
+      body: draftBody,
+    },
+    timeout,
+  );
+}
+
+// 远端草稿可能在公众号后台被人工删除；用 draft/get 明确确认，避免把内容错误误判为草稿丢失。
+async function remoteDraftMissing(
+  runtime: WxRuntimeConfig,
+  accessToken: string,
+  mediaId: string,
+  timeout: number,
+): Promise<boolean> {
+  try {
+    await requestJson(
+      `${runtime.baseUrl}${DRAFT_GET_PATH}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${runtime.pat}` },
+        body: { access_token: accessToken, media_id: mediaId },
+      },
+      timeout,
+    );
+    return false;
+  } catch (error) {
+    // 只有中转层的明确 4xx 拒绝才视为草稿不存在；网络中断等未知结果保守返回 false。
+    return error instanceof WxServiceHttpError && error.status >= 400 && error.status < 500;
+  }
+}
+
+// 重建草稿是新的外部写操作：派生独立幂等键，避免与原 update 请求在中转层指纹冲突。
+function recreateDraftIdempotencyKey(idempotencyKey: string | undefined): string | undefined {
+  return idempotencyKey ? createHash("sha256").update(`wx-recreate:${idempotencyKey}`).digest("hex") : undefined;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -661,48 +717,44 @@ export async function createWechatDraft(input: WechatDraftInput): Promise<Record
   const cropParams = uploadResult.coverCrop ?? {};
 
   const isUpdate = !!input.existingDraftMediaId;
-  const draftPath = isUpdate ? DRAFT_UPDATE_PATH : DRAFT_ADD_PATH;
+  const article = {
+    article_type: "news",
+    title: input.title,
+    content: replacedHtml,
+    thumb_media_id: uploadResult.coverMediaId,
+    ...cropParams,
+  } as const;
   const draftBody = isUpdate
     ? {
         access_token: accessToken,
         media_id: input.existingDraftMediaId,
         index: 0,
-        articles: {
-          article_type: "news",
-          title: input.title,
-          content: replacedHtml,
-          thumb_media_id: uploadResult.coverMediaId,
-          ...cropParams,
-        },
+        articles: article,
       }
     : {
         access_token: accessToken,
-        articles: [
-          {
-            article_type: "news",
-            title: input.title,
-            content: replacedHtml,
-            thumb_media_id: uploadResult.coverMediaId,
-            ...cropParams,
-          },
-        ],
+        articles: [article],
       };
 
-  const response = await requestJson(
-    `${runtime.baseUrl}${draftPath}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${runtime.pat}`,
-        ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : {}),
-      },
-      body: draftBody,
-    },
-    draftTimeout,
-  );
+  let response: unknown;
+  let recreated = false;
+  try {
+    response = await postDraft(runtime, isUpdate ? DRAFT_UPDATE_PATH : DRAFT_ADD_PATH, draftBody, input.idempotencyKey, draftTimeout);
+  } catch (error) {
+    // 原草稿已在公众号后台被删除时，更新永远失败；确认后降级为新建，让本次更新仍然完成。
+    if (!isUpdate || !(await remoteDraftMissing(runtime, accessToken, input.existingDraftMediaId!, draftTimeout))) throw error;
+    console.warn(`[wechat] existing draft ${input.existingDraftMediaId} is gone on the remote account; recreating via draft/add`);
+    response = await postDraft(
+      runtime,
+      DRAFT_ADD_PATH,
+      { access_token: accessToken, articles: [article] },
+      recreateDraftIdempotencyKey(input.idempotencyKey),
+      draftTimeout,
+    );
+    recreated = true;
+  }
 
-  const draftMediaId = resolveDraftMediaId(response, input.existingDraftMediaId);
+  const draftMediaId = resolveDraftMediaId(response, recreated ? null : input.existingDraftMediaId);
 
   // ── Callback to Nezus to persist media_id ──
   if (draftMediaId && input.noteId && input.nezusBaseUrl && input.nezusPat) {
@@ -723,6 +775,7 @@ export async function createWechatDraft(input: WechatDraftInput): Promise<Record
     totalUploaded: uploadResult.totalUploaded,
     coverMediaId: uploadResult.coverMediaId,
     isUpdate,
+    ...(recreated ? { recreated, originalDraftMediaId: input.existingDraftMediaId } : {}),
     draftMediaId,
     response,
   };
@@ -754,48 +807,44 @@ export async function createWechatNewspic(input: WechatNewspicInput): Promise<Re
   };
 
   const isUpdate = !!input.existingDraftMediaId;
-  const draftPath = isUpdate ? DRAFT_UPDATE_PATH : DRAFT_ADD_PATH;
+  const article = {
+    article_type: "newspic",
+    title: input.title,
+    content: input.content,
+    thumb_media_id: uploadResult.coverMediaId,
+    image_info: imageInfo,
+  } as const;
   const draftBody = isUpdate
     ? {
         access_token: accessToken,
         media_id: input.existingDraftMediaId,
         index: 0,
-        articles: {
-          article_type: "newspic",
-          title: input.title,
-          content: input.content,
-          thumb_media_id: uploadResult.coverMediaId,
-          image_info: imageInfo,
-        },
+        articles: article,
       }
     : {
         access_token: accessToken,
-        articles: [
-          {
-            article_type: "newspic",
-            title: input.title,
-            content: input.content,
-            thumb_media_id: uploadResult.coverMediaId,
-            image_info: imageInfo,
-          },
-        ],
+        articles: [article],
       };
 
-  const response = await requestJson(
-    `${runtime.baseUrl}${draftPath}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${runtime.pat}`,
-        ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : {}),
-      },
-      body: draftBody,
-    },
-    draftTimeout,
-  );
+  let response: unknown;
+  let recreated = false;
+  try {
+    response = await postDraft(runtime, isUpdate ? DRAFT_UPDATE_PATH : DRAFT_ADD_PATH, draftBody, input.idempotencyKey, draftTimeout);
+  } catch (error) {
+    // 原草稿已在公众号后台被删除时，更新永远失败；确认后降级为新建，让本次更新仍然完成。
+    if (!isUpdate || !(await remoteDraftMissing(runtime, accessToken, input.existingDraftMediaId!, draftTimeout))) throw error;
+    console.warn(`[wechat] existing draft ${input.existingDraftMediaId} is gone on the remote account; recreating via draft/add`);
+    response = await postDraft(
+      runtime,
+      DRAFT_ADD_PATH,
+      { access_token: accessToken, articles: [article] },
+      recreateDraftIdempotencyKey(input.idempotencyKey),
+      draftTimeout,
+    );
+    recreated = true;
+  }
 
-  const draftMediaId = resolveDraftMediaId(response, input.existingDraftMediaId);
+  const draftMediaId = resolveDraftMediaId(response, recreated ? null : input.existingDraftMediaId);
 
   // ── Callback to Nezus to persist media_id ──
   if (draftMediaId && input.noteId && input.nezusBaseUrl && input.nezusPat) {
@@ -816,6 +865,7 @@ export async function createWechatNewspic(input: WechatNewspicInput): Promise<Re
     totalUploaded: uploadResult.totalUploaded,
     coverMediaId: uploadResult.coverMediaId,
     isUpdate,
+    ...(recreated ? { recreated, originalDraftMediaId: input.existingDraftMediaId } : {}),
     draftMediaId,
     response,
   };
