@@ -428,7 +428,7 @@ zzp monitor stop
 ```bash
 bun install
 bun test
-bun x tsc --noEmit
+bun run typecheck
 bun run build:wechat-preview
 bun run build
 ```
