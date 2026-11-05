@@ -27,6 +27,7 @@ Pipeline 可以独立使用，也可以作为 Web、App、桌面客户端背后�
 | myno CSS 入口 | `@akairos/myno/article.css` 与 `tokens-default.css`，统一提供正文排版和主题变量 | 仅复用样式时无需加载编辑器脚本 |
 | [Obsidian 微信发布插件](https://github.com/k7airos/obsidian-wechat-publish) | 通过本机 `zzp` 调用 Pipeline 的桌面客户端 | 在 Obsidian 内提交笔记到公众号草稿箱 |
 | [Kairos Skills](https://github.com/k7airos/kairos-skills) | 外部 Agent 的写作规范、审核与状态机编排说明 | 让 Agent 按 `status → next_action` 写稿和推进任务 |
+| [`zzhub-style-config` Skill](skills/zzhub-style-config/SKILL.md) | 本仓库内置的文章样式、封面主题与 Studio 模板配置指引 | 让 Agent 直接读取和修改已支持的排版配置 |
 | [blog.zzao.club](https://github.com/k7airos/blog.zzao.club) | 博客路由的公开消费方和目录约定示例 | 将文章同步到 Nuxt Content，再执行自定义发布命令 |
 | [Bun 微信中转服务](https://github.com/k7airos/bun-wx-server) | 可参考的自托管认证、COS 与基础微信代理实现 | 研究中转 API；当前只覆盖部分微信端点，接入限制见该仓库 README |
 
@@ -420,6 +421,7 @@ zzp monitor stop
 - [云端 Worker API、部署与更新](services/cloud-worker/README.md)
 - [封面主题和图片排版](docs/render-themes.md)
 - [离线正文模板](ARTICLE-THEMES.md)
+- [`zzhub-style-config` Skill](skills/zzhub-style-config/SKILL.md)：Agent 直接配置文章样式、封面主题和 Studio 模板
 - [Kairos Agent Skills 仓库](https://github.com/k7airos/kairos-skills)：配套的 Agent 技能集合（包含 `zzhub-publish` 状态机编排、`milkdown-writing` 写作排版规范、`auto-ai-daily` 自动化发文）
 - [第三方声明](THIRD-PARTY-NOTICES.md)
 
